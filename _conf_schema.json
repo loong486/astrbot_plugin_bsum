@@ -1,0 +1,14 @@
+{
+  "llm_api_key": {
+    "description": "大模型 API Key (必填项，请前往大模型官网申请)",
+    "type": "string"
+  },
+  "llm_api_url": {
+    "description": "大模型 API 接口地址 (如不填则默认使用 DeepSeek 官方接口)",
+    "type": "string"
+  },
+  "llm_model_name": {
+    "description": "大模型名称 (如不填则默认为 deepseek-chat)",
+    "type": "string"
+  }
+}
