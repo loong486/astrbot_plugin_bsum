@@ -1,5 +1,5 @@
 name: astrbot_plugin_bsum
-desc: B站视频总结插件
+desc: 一款为 AstrBot 设计的 Bilibili 视频总结插件，能够自动提取视频简介，并调用大语言模型（LLM）生成核心内容与关键要点总结。✨
 help: 发送 /bsum <B站视频链接> 即可提取文案并总结
 version: v1.0.0
 author: loong486
