@@ -87,43 +87,49 @@ class BilibiliSummaryPlugin(Star):
 
     async def render_html_to_image(self, title: str, summary: dict) -> str:
         def _render():
-            # ✨ 针对 Linux VPS 的核心修复：手动指定可能的浏览器路径
-            browser_path = None
-            paths_to_check = [
-                "/usr/bin/chromium-browser",
-                "/usr/bin/chromium",
-                "/usr/bin/google-chrome",
-                "/usr/bin/google-chrome-stable",
-                "/snap/bin/chromium"
-            ]
-            for p in paths_to_check:
-                if os.path.exists(p):
-                    browser_path = p
-                    break
+            try:
+                browser_path = None
+                paths_to_check = [
+                    "/usr/bin/chromium-browser",
+                    "/usr/bin/chromium",
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/google-chrome-stable",
+                    "/snap/bin/chromium",
+                    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",  # Windows
+                ]
+                for p in paths_to_check:
+                    if os.path.exists(p):
+                        browser_path = p
+                        break
             
-            # 初始化，带上 VPS 运行必备的几个参数
-            hti = Html2Image(
-                browser_executable=browser_path, 
-                custom_flags=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
-            )
-            hti.output_path = self.temp_dir
+                if not browser_path:
+                    raise Exception("未找到可用的浏览器，请安装 Chromium 或 Google Chrome")
             
-            filename = f"summary_{int(time.time())}.png"
-            points_html = "".join([f"<li>{p}</li>" for p in summary.get('points', [])])
+                hti = Html2Image(
+                    browser_executable=browser_path, 
+                    custom_flags=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+                )
+                hti.output_path = self.temp_dir
             
-            html_content = f"""
-            <html>
-            <body style="background-color: #1e1e2e; color: #cdd6f4; font-family: sans-serif; padding: 30px; width: 600px;">
-                <div style="background: #181825; border-radius: 12px; padding: 25px; border: 1px solid #313244;">
-                    <h1 style="color: #89b4fa; font-size: 24px; border-bottom: 1px solid #313244; padding-bottom: 10px;">{title}</h1>
-                    <p style="background: #313244; padding: 15px; border-left: 4px solid #a6e3a1; border-radius: 4px;">{summary.get('core', '')}</p>
-                    <ul style="line-height: 1.6;">{points_html}</ul>
-                </div>
-            </body>
-            </html>
-            """
-            
-            hti.snapshot(html_str=html_content, save_as=filename, size=(660, 600))
-            return os.path.join(self.temp_dir, filename)
+                filename = f"summary_{int(time.time())}.png"
+                points_html = "".join([f"<li>{p}</li>" for p in summary.get('points', [])])
+                
+                html_content = f"""
+                <html>
+                <body style="background-color: #1e1e2e; color: #cdd6f4; font-family: sans-serif; padding: 30px; width: 600px;">
+                    <div style="background: #181825; border-radius: 12px; padding: 25px; border: 1px solid #313244;">
+                        <h1 style="color: #89b4fa; font-size: 24px; border-bottom: 1px solid #313244; padding-bottom: 10px;">{title}</h1>
+                        <p style="background: #313244; padding: 15px; border-left: 4px solid #a6e3a1; border-radius: 4px;">{summary.get('core', '')}</p>
+                        <ul style="line-height: 1.6;">{points_html}</ul>
+                    </div>
+                </body>
+                </html>
+                """
+                
+                hti.snapshot(html_str=html_content, save_as=filename, size=(660, 600))
+                return os.path.join(self.temp_dir, filename)
+            except Exception as e:
+                print(f"[Html2Image Error]: {str(e)}")
+                raise
             
         return await asyncio.to_thread(_render)
