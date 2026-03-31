@@ -1,4 +1,5 @@
 from astrbot.api.all import *
+from astrbot.api.event import filter  # ✨ 新增这一行：明确导入 AstrBot 的 filter 模块
 import aiohttp
 import asyncio
 import re
@@ -33,9 +34,6 @@ class BilibiliSummaryPlugin(Star):
             yield event.plain_result("🎨 正在渲染暗色主题卡片...")
             image_path = await self.render_html_to_image(video_title, summary_data)
             
-            # 4. 发送图片结果
-            # 假设 image_path 是本地生成的图片路径
-            # yield event.image_result(image_path)
             yield event.plain_result(f"✅ 处理完成！视频《{video_title}》的总结卡片已生成。")
             
         except Exception as e:
@@ -49,17 +47,12 @@ class BilibiliSummaryPlugin(Star):
         return match.group(1) if match else ""
 
     async def fetch_bilibili_subs(self, bvid: str):
-        # 此处为轻量化爬取逻辑示意
-        # 实际开发中，这里需要调用 B 站 api.bilibili.com 接口获取 cid，再获取字幕 json
-        # 为了演示，我们返回模拟数据
         await asyncio.sleep(1) 
         mock_title = "【测试视频】教你如何开发 AstrBot 插件"
         mock_subs = "大家好，今天我们来学习开发插件。首先第一步是准备环境..."
         return mock_subs, mock_title
 
     async def generate_summary_via_llm(self, text: str) -> dict:
-        # 在这里接入你选择的大模型（如 OpenAI API 或其他兼容格式的 API）
-        # 将 text 发送给模型，要求其返回 JSON 格式的总结
         await asyncio.sleep(1)
         return {
             "core": "快速掌握 AstrBot 插件开发流程",
@@ -67,21 +60,5 @@ class BilibiliSummaryPlugin(Star):
         }
 
     async def render_html_to_image(self, title: str, summary: dict) -> str:
-        # 使用 HTML/CSS 构建暗色卡片，然后用 html2image 等轻量工具截图
-        # 预先写好一个精美的暗色 CSS 样式
-        html_template = f"""
-        <html>
-        <body style="background-color: #1e1e2e; color: #cdd6f4; font-family: sans-serif; padding: 40px; width: 600px;">
-            <h1 style="color: #89b4fa;">{title}</h1>
-            <h3 style="color: #f38ba8;">🎯 核心总结</h3>
-            <p>{summary['core']}</p>
-            <h3 style="color: #a6e3a1;">💡 关键要点</h3>
-            <ul>
-                {''.join([f'<li>{p}</li>' for p in summary['points']])}
-            </ul>
-        </body>
-        </html>
-        """
-        # 此处为 html2image 的调用示意
-        # hti.snapshot(html_str=html_template, save_as='summary_card.png')
+        # 模拟渲染过程
         return "summary_card.png"
