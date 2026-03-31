@@ -6,22 +6,16 @@ import re
 import json
 import os
 import time
-from html2image import Html2Image
 
 @register("bilibili_summary", "YourName", "B站视频总结插件", "1.0.0")
 class BilibiliSummaryPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
-        
-        # 获取基础目录并确保图片存放目录存在
-        base_dir = os.getcwd()
-        self.temp_dir = os.path.join(base_dir, "data", "bili_summary_pics")
-        os.makedirs(self.temp_dir, exist_ok=True)
     
     @filter.command("bsum")
     async def bilibili_summary(self, event: AstrMessageEvent, url: str):
-        '''生成B站视频总结卡片。使用方法：/bsum <B站链接>'''
+        '''生成B站视频总结。使用方法：/bsum <B站链接>'''
         yield event.plain_result("⏳ 正在处理中，请稍候...")
         
         try:
@@ -36,12 +30,9 @@ class BilibiliSummaryPlugin(Star):
             # 2. AI 总结
             summary_data = await self.generate_summary_via_llm(text_content, video_title)
             
-            # 3. 渲染图片
-            yield event.plain_result("🎨 正在绘制暗黑主题卡片...")
-            image_path = await self.render_html_to_image(video_title, summary_data)
-            
-            # 4. 发送图片
-            yield event.image_result(image_path)
+            # 3. 格式化输出
+            result_text = self.format_summary(video_title, summary_data)
+            yield event.plain_result(result_text)
             
         except Exception as e:
             yield event.plain_result(f"❌ 运行过程中出现错误：{str(e)}")
@@ -85,114 +76,20 @@ class BilibiliSummaryPlugin(Star):
                 content = result['choices'][0]['message']['content']
                 return json.loads(content)
 
-    async def render_html_to_image(self, title: str, summary: dict) -> str:
-        def _render():
-            try:
-                browser_path = None
-                paths_to_check = [
-                    "/usr/bin/chromium",
-                    "/usr/bin/chromium-browser",
-                    "/snap/bin/chromium",
-                    "/usr/bin/google-chrome",
-                    "/usr/bin/google-chrome-stable",
-                    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-                    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-                ]
-                
-                for p in paths_to_check:
-                    if os.path.exists(p):
-                        browser_path = p
-                        break
-                
-                if not browser_path:
-                    raise Exception("❌ 未找到浏览器！请安装 Chromium 或 Google Chrome")
-                
-                hti = Html2Image(
-                    browser_executable=browser_path,
-                    custom_flags=[
-                        '--no-sandbox',
-                        '--disable-gpu',
-                        '--disable-dev-shm-usage',
-                        '--disable-font-subpixel-positioning'
-                    ]
-                )
-                hti.output_path = self.temp_dir
-                
-                filename = f"summary_{int(time.time())}"
-                points_html = "".join([f"<li>{p}</li>" for p in summary.get('points', [])])
-                
-                html_content = f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="utf-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <style>
-                        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700&display=swap');
-                        * {{
-                            margin: 0;
-                            padding: 0;
-                            box-sizing: border-box;
-                        }}
-                        html, body {{
-                            font-family: 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif;
-                            -webkit-font-smoothing: antialiased;
-                            -moz-osx-font-smoothing: grayscale;
-                        }}
-                        body {{
-                            background-color: #1e1e2e;
-                            color: #cdd6f4;
-                            padding: 30px;
-                            width: 600px;
-                        }}
-                        .container {{
-                            background: #181825;
-                            border-radius: 12px;
-                            padding: 25px;
-                            border: 1px solid #313244;
-                        }}
-                        h1 {{
-                            color: #89b4fa;
-                            font-size: 24px;
-                            border-bottom: 1px solid #313244;
-                            padding-bottom: 10px;
-                            margin-bottom: 15px;
-                            font-family: 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif;
-                        }}
-                        .core {{
-                            background: #313244;
-                            padding: 15px;
-                            border-left: 4px solid #a6e3a1;
-                            border-radius: 4px;
-                            margin-bottom: 15px;
-                            font-family: 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif;
-                            line-height: 1.6;
-                        }}
-                        ul {{
-                            line-height: 1.8;
-                            padding-left: 20px;
-                            font-family: 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif;
-                        }}
-                        li {{
-                            margin-bottom: 8px;
-                        }}
-                    </style>
-                </head>
-                <body>
-                    <div class="container">
-                        <h1>{title}</h1>
-                        <div class="core">{summary.get('core', '')}</div>
-                        <ul>{points_html}</ul>
-                    </div>
-                </body>
-                </html>
-                """
-                
-                hti.screenshot(html_str=html_content, save_as=f"{filename}.png", size=(660, 600))
-                return os.path.join(self.temp_dir, f"{filename}.png")
-                
-            except Exception as e:
-                print(f"[Html2Image Error]: {str(e)}")
-                raise
+    def format_summary(self, title: str, summary: dict) -> str:
+        """格式化总结输出为文字"""
+        core = summary.get('core', '无')
+        points = summary.get('points', [])
         
-        return await asyncio.to_thread(_render)
+        result = f"""
+📺 【{title}】
+
+📌 核心内容：
+{core}
+
+✨ 关键要点：
+"""
+        for i, point in enumerate(points, 1):
+            result += f"{i}. {point}\n"
+        
+        return result
