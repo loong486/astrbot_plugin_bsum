@@ -4,13 +4,19 @@ import aiohttp
 import asyncio
 import re
 import json
+import os
+import time
+from html2image import Html2Image
 
 @register("bilibili_summary", "YourName", "B站视频轻量总结插件", "1.0.0")
 class BilibiliSummaryPlugin(Star):
-    # ✨ 这里的 init 方法多了一个 config: dict 参数，用来接收面板上的配置
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
+        # 定义一个存放生成图片的临时目录
+        self.temp_dir = os.path.join(context.work_dir, "data", "bili_summary_pics")
+        if not os.path.exists(self.temp_dir):
+            os.makedirs(self.temp_dir, exist_ok=True)
     
     @filter.command("bsum")
     async def bilibili_summary(self, event: AstrMessageEvent, url: str):
@@ -29,10 +35,11 @@ class BilibiliSummaryPlugin(Star):
             yield event.plain_result(f"🧠 正在阅读《{video_title}》的简介，生成结构化总结...")
             summary_data = await self.generate_summary_via_llm(text_content, video_title)
             
-            yield event.plain_result("🎨 正在渲染暗色主题卡片...")
+            yield event.plain_result("🎨 正在渲染暗色主题卡片，马上就来...")
             image_path = await self.render_html_to_image(video_title, summary_data)
             
-            yield event.plain_result(f"✅ 处理完成！视频《{video_title}》的总结卡片已生成。\n（测试阶段打印结果：{summary_data['core']}）")
+            # ✨ 核心变化：以前是发文字，现在我们直接把生成的图片发出去！
+            yield event.image_result(image_path)
             
         except Exception as e:
             yield event.plain_result(f"❌ 运行过程中出现错误：{str(e)}")
@@ -64,18 +71,15 @@ class BilibiliSummaryPlugin(Star):
                 return desc, title
 
     async def generate_summary_via_llm(self, text: str, title: str) -> dict:
-        # ✨ 从 AstrBot 可视化面板读取用户填写的配置
         api_key = self.config.get("llm_api_key", "").strip()
         api_url = self.config.get("llm_api_url", "").strip()
         model_name = self.config.get("llm_model_name", "").strip()
         
-        # 兜底机制：如果用户没填 URL 和模型名，默认给 DeepSeek 的
         if not api_url:
             api_url = "https://api.deepseek.com/v1/chat/completions"
         if not model_name:
             model_name = "deepseek-chat"
 
-        # 检查是否填了 API Key
         if not api_key:
              raise Exception("未配置大模型的 API Key！请前往 AstrBot 管理面板 -> 插件配置 中填写。")
 
@@ -121,5 +125,103 @@ class BilibiliSummaryPlugin(Star):
                     raise Exception("大模型没有按规定返回 JSON 格式，请重试。返回内容：" + content)
 
     async def render_html_to_image(self, title: str, summary: dict) -> str:
-        await asyncio.sleep(1)
-        return "summary_card.png"
+        """使用 HTML/CSS 渲染暗黑主题卡片，并截图保存"""
+        
+        # 将耗时的截图操作放在子线程运行，防止阻塞机器人
+        def _render():
+            # 这里的 flags 是为了保证在没有显示器的 VPS Linux 系统上也能稳定运行
+            hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'])
+            hti.output_path = self.temp_dir
+            
+            filename = f"summary_{int(time.time())}.png"
+            output_filepath = os.path.join(self.temp_dir, filename)
+            
+            # 将要点列表组装成 HTML 的 <li> 标签
+            points_html = "".join([f"<li>{p}</li>" for p in summary.get('points', [])])
+            core_text = summary.get('core', '未提取到核心内容')
+            
+            # 精美的暗黑 CSS 样式
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body {{
+                        background-color: #1e1e2e;
+                        color: #cdd6f4;
+                        font-family: 'Microsoft YaHei', sans-serif;
+                        padding: 40px;
+                        width: 720px;
+                        margin: 0;
+                        box-sizing: border-box;
+                    }}
+                    .container {{
+                        background: #181825;
+                        border-radius: 16px;
+                        padding: 30px;
+                        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+                        border: 1px solid #313244;
+                    }}
+                    h1 {{
+                        color: #89b4fa;
+                        font-size: 26px;
+                        margin-top: 0;
+                        border-bottom: 2px solid #313244;
+                        padding-bottom: 15px;
+                        line-height: 1.4;
+                    }}
+                    .section-title {{
+                        color: #f38ba8;
+                        font-size: 20px;
+                        margin-top: 25px;
+                        font-weight: bold;
+                    }}
+                    .core-text {{
+                        background: #313244;
+                        padding: 15px 20px;
+                        border-left: 5px solid #a6e3a1;
+                        border-radius: 8px;
+                        font-size: 18px;
+                        line-height: 1.6;
+                        margin-top: 15px;
+                    }}
+                    ul {{
+                        margin-top: 15px;
+                        padding-left: 25px;
+                    }}
+                    li {{
+                        font-size: 18px;
+                        line-height: 1.6;
+                        margin-bottom: 12px;
+                        color: #bac2de;
+                    }}
+                    .footer {{
+                        margin-top: 30px;
+                        text-align: right;
+                        color: #6c7086;
+                        font-size: 14px;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>{title}</h1>
+                    <div class="section-title">🎯 核心提炼</div>
+                    <div class="core-text">{core_text}</div>
+                    <div class="section-title">💡 关键要点</div>
+                    <ul>
+                        {points_html}
+                    </ul>
+                    <div class="footer">🚀 Generated by AstrBot Bilibili Plugin</div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            # 使用 html2image 渲染，设置截图宽高
+            hti.snapshot(html_str=html_content, save_as=filename, size=(800, 800))
+            return output_filepath
+            
+        # 异步调用同步渲染函数
+        return await asyncio.to_thread(_render)
