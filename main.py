@@ -122,12 +122,17 @@ class BilibiliSummaryPlugin(Star):
                 
                 html_content = f"""
                 <html>
-                <head><meta charset="utf-8"></head>
-                <body style="background-color: #1e1e2e; color: #cdd6f4; font-family: sans-serif; padding: 30px; width: 600px; margin: 0;">
+                <head>
+                    <meta charset="utf-8">
+                    <style>
+                        body {{ font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', sans-serif; }}
+                    </style>
+                </head>
+                <body style="background-color: #1e1e2e; color: #cdd6f4; font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif; padding: 30px; width: 600px; margin: 0;">
                     <div style="background: #181825; border-radius: 12px; padding: 25px; border: 1px solid #313244;">
-                        <h1 style="color: #89b4fa; font-size: 24px; border-bottom: 1px solid #313244; padding-bottom: 10px; margin-top: 0;">{title}</h1>
-                        <p style="background: #313244; padding: 15px; border-left: 4px solid #a6e3a1; border-radius: 4px;">{summary.get('core', '')}</p>
-                        <ul style="line-height: 1.6; padding-left: 20px;">{points_html}</ul>
+                        <h1 style="color: #89b4fa; font-size: 24px; border-bottom: 1px solid #313244; padding-bottom: 10px; margin-top: 0; font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;">{title}</h1>
+                        <p style="background: #313244; padding: 15px; border-left: 4px solid #a6e3a1; border-radius: 4px; font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;">{summary.get('core', '')}</p>
+                        <ul style="line-height: 1.6; padding-left: 20px; font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;">{points_html}</ul>
                     </div>
                 </body>
                 </html>
