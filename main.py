@@ -90,13 +90,11 @@ class BilibiliSummaryPlugin(Star):
             try:
                 browser_path = None
                 paths_to_check = [
-                    # Docker/Linux 现代包路径（优先检查）
                     "/usr/bin/chromium",
                     "/usr/bin/chromium-browser",
                     "/snap/bin/chromium",
                     "/usr/bin/google-chrome",
                     "/usr/bin/google-chrome-stable",
-                    # Windows 路径
                     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
                     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
                 ]
@@ -104,28 +102,22 @@ class BilibiliSummaryPlugin(Star):
                 for p in paths_to_check:
                     if os.path.exists(p):
                         browser_path = p
-                        print(f"[✓] 检测到浏览器: {browser_path}")
                         break
-            
+                
                 if not browser_path:
-                    raise Exception(
-                        "❌ 未找到浏览器！\n"
-                        "Docker 环境请执行：apt-get update && apt-get install -y chromium\n"
-                        "本地环境请安装 Google Chrome"
-                    )
-            
+                    raise Exception("❌ 未找到浏览器！请安装 Chromium 或 Google Chrome")
+                
                 hti = Html2Image(
-                    browser_executable=browser_path, 
+                    browser_executable=browser_path,
                     custom_flags=[
                         '--no-sandbox',
                         '--disable-gpu',
-                        '--disable-dev-shm-usage',
-                        '--disable-extensions'
+                        '--disable-dev-shm-usage'
                     ]
                 )
                 hti.output_path = self.temp_dir
-            
-                filename = f"summary_{int(time.time())}.png"
+                
+                filename = f"summary_{int(time.time())}"
                 points_html = "".join([f"<li>{p}</li>" for p in summary.get('points', [])])
                 
                 html_content = f"""
@@ -135,16 +127,18 @@ class BilibiliSummaryPlugin(Star):
                     <div style="background: #181825; border-radius: 12px; padding: 25px; border: 1px solid #313244;">
                         <h1 style="color: #89b4fa; font-size: 24px; border-bottom: 1px solid #313244; padding-bottom: 10px; margin-top: 0;">{title}</h1>
                         <p style="background: #313244; padding: 15px; border-left: 4px solid #a6e3a1; border-radius: 4px;">{summary.get('core', '')}</p>
-                        <ul style="line-height: 1.6;">{points_html}</ul>
+                        <ul style="line-height: 1.6; padding-left: 20px;">{points_html}</ul>
                     </div>
                 </body>
                 </html>
                 """
                 
-                hti.snapshot(html_str=html_content, save_as=filename, size=(660, 600))
-                return os.path.join(self.temp_dir, filename)
+                # 使用 screenshot 而不是 snapshot
+                hti.screenshot(html_str=html_content, save_as=f"{filename}.png", size=(660, 600))
+                return os.path.join(self.temp_dir, f"{filename}.png")
+                
             except Exception as e:
                 print(f"[Html2Image Error]: {str(e)}")
                 raise
-            
+        
         return await asyncio.to_thread(_render)
