@@ -1,0 +1,6 @@
+name: astrbot_plugin_bsum
+desc: B站视频总结插件，自动提取字幕并生成暗色总结卡片
+help: 发送 /bsum <B站视频链接> 即可提取文案并总结
+version: v1.0.0
+author: YourName
+repo: https://github.com/loong486/astrbot_plugin_bsum
