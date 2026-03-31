@@ -1,0 +1,7 @@
+{
+  "name": "bilibili_summary",
+  "author": "loong486",
+  "version": "1.0.0",
+  "description": "B站视频总结插件，自动提取字幕并生成暗色总结卡片",
+  "repo": "https://github.com/loong486/astrbot_plugin_bsum"
+}
