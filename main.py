@@ -112,7 +112,8 @@ class BilibiliSummaryPlugin(Star):
                     custom_flags=[
                         '--no-sandbox',
                         '--disable-gpu',
-                        '--disable-dev-shm-usage'
+                        '--disable-dev-shm-usage',
+                        '--disable-font-subpixel-positioning'
                     ]
                 )
                 hti.output_path = self.temp_dir
@@ -121,24 +122,72 @@ class BilibiliSummaryPlugin(Star):
                 points_html = "".join([f"<li>{p}</li>" for p in summary.get('points', [])])
                 
                 html_content = f"""
+                <!DOCTYPE html>
                 <html>
                 <head>
                     <meta charset="utf-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
                     <style>
-                        body {{ font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', sans-serif; }}
+                        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700&display=swap');
+                        * {{
+                            margin: 0;
+                            padding: 0;
+                            box-sizing: border-box;
+                        }}
+                        html, body {{
+                            font-family: 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif;
+                            -webkit-font-smoothing: antialiased;
+                            -moz-osx-font-smoothing: grayscale;
+                        }}
+                        body {{
+                            background-color: #1e1e2e;
+                            color: #cdd6f4;
+                            padding: 30px;
+                            width: 600px;
+                        }}
+                        .container {{
+                            background: #181825;
+                            border-radius: 12px;
+                            padding: 25px;
+                            border: 1px solid #313244;
+                        }}
+                        h1 {{
+                            color: #89b4fa;
+                            font-size: 24px;
+                            border-bottom: 1px solid #313244;
+                            padding-bottom: 10px;
+                            margin-bottom: 15px;
+                            font-family: 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif;
+                        }}
+                        .core {{
+                            background: #313244;
+                            padding: 15px;
+                            border-left: 4px solid #a6e3a1;
+                            border-radius: 4px;
+                            margin-bottom: 15px;
+                            font-family: 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif;
+                            line-height: 1.6;
+                        }}
+                        ul {{
+                            line-height: 1.8;
+                            padding-left: 20px;
+                            font-family: 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif;
+                        }}
+                        li {{
+                            margin-bottom: 8px;
+                        }}
                     </style>
                 </head>
-                <body style="background-color: #1e1e2e; color: #cdd6f4; font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif; padding: 30px; width: 600px; margin: 0;">
-                    <div style="background: #181825; border-radius: 12px; padding: 25px; border: 1px solid #313244;">
-                        <h1 style="color: #89b4fa; font-size: 24px; border-bottom: 1px solid #313244; padding-bottom: 10px; margin-top: 0; font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;">{title}</h1>
-                        <p style="background: #313244; padding: 15px; border-left: 4px solid #a6e3a1; border-radius: 4px; font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;">{summary.get('core', '')}</p>
-                        <ul style="line-height: 1.6; padding-left: 20px; font-family: 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;">{points_html}</ul>
+                <body>
+                    <div class="container">
+                        <h1>{title}</h1>
+                        <div class="core">{summary.get('core', '')}</div>
+                        <ul>{points_html}</ul>
                     </div>
                 </body>
                 </html>
                 """
                 
-                # 使用 screenshot 而不是 snapshot
                 hti.screenshot(html_str=html_content, save_as=f"{filename}.png", size=(660, 600))
                 return os.path.join(self.temp_dir, f"{filename}.png")
                 
