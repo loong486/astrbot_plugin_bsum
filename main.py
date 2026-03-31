@@ -13,10 +13,17 @@ class BilibiliSummaryPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
-        # 定义一个存放生成图片的临时目录
-        self.temp_dir = os.path.join(context.work_dir, "data", "bili_summary_pics")
+        
+        # ✨ 修复点：改用 os.getcwd() 获取当前工作目录，避免 Context 属性错误
+        base_dir = os.getcwd()
+        self.temp_dir = os.path.join(base_dir, "data", "bili_summary_pics")
+        
+        # 确保图片存放目录存在
         if not os.path.exists(self.temp_dir):
-            os.makedirs(self.temp_dir, exist_ok=True)
+            try:
+                os.makedirs(self.temp_dir, exist_ok=True)
+            except Exception as e:
+                print(f"[BiliSummary] 创建目录失败: {e}")
     
     @filter.command("bsum")
     async def bilibili_summary(self, event: AstrMessageEvent, url: str):
@@ -38,7 +45,7 @@ class BilibiliSummaryPlugin(Star):
             yield event.plain_result("🎨 正在渲染暗色主题卡片，马上就来...")
             image_path = await self.render_html_to_image(video_title, summary_data)
             
-            # ✨ 核心变化：以前是发文字，现在我们直接把生成的图片发出去！
+            # 发送生成的图片
             yield event.image_result(image_path)
             
         except Exception as e:
@@ -122,25 +129,20 @@ class BilibiliSummaryPlugin(Star):
                     summary_dict = json.loads(content)
                     return summary_dict
                 except json.JSONDecodeError:
-                    raise Exception("大模型没有按规定返回 JSON 格式，请重试。返回内容：" + content)
+                    raise Exception("大模型没有按规定返回 JSON 格式。返回内容：" + content)
 
     async def render_html_to_image(self, title: str, summary: dict) -> str:
-        """使用 HTML/CSS 渲染暗黑主题卡片，并截图保存"""
-        
-        # 将耗时的截图操作放在子线程运行，防止阻塞机器人
         def _render():
-            # 这里的 flags 是为了保证在没有显示器的 VPS Linux 系统上也能稳定运行
+            # 针对 VPS 无头环境优化参数
             hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'])
             hti.output_path = self.temp_dir
             
             filename = f"summary_{int(time.time())}.png"
             output_filepath = os.path.join(self.temp_dir, filename)
             
-            # 将要点列表组装成 HTML 的 <li> 标签
             points_html = "".join([f"<li>{p}</li>" for p in summary.get('points', [])])
             core_text = summary.get('core', '未提取到核心内容')
             
-            # 精美的暗黑 CSS 样式
             html_content = f"""
             <!DOCTYPE html>
             <html>
@@ -150,7 +152,7 @@ class BilibiliSummaryPlugin(Star):
                     body {{
                         background-color: #1e1e2e;
                         color: #cdd6f4;
-                        font-family: 'Microsoft YaHei', sans-serif;
+                        font-family: 'sans-serif';
                         padding: 40px;
                         width: 720px;
                         margin: 0;
@@ -219,9 +221,7 @@ class BilibiliSummaryPlugin(Star):
             </html>
             """
             
-            # 使用 html2image 渲染，设置截图宽高
             hti.snapshot(html_str=html_content, save_as=filename, size=(800, 800))
             return output_filepath
             
-        # 异步调用同步渲染函数
         return await asyncio.to_thread(_render)
