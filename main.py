@@ -14,11 +14,10 @@ class BilibiliSummaryPlugin(Star):
         super().__init__(context)
         self.config = config
         
-        # ✨ 修复点：改用 os.getcwd() 获取当前工作目录，避免 Context 属性错误
+        # 获取当前工作目录
         base_dir = os.getcwd()
         self.temp_dir = os.path.join(base_dir, "data", "bili_summary_pics")
         
-        # 确保图片存放目录存在
         if not os.path.exists(self.temp_dir):
             try:
                 os.makedirs(self.temp_dir, exist_ok=True)
@@ -45,7 +44,6 @@ class BilibiliSummaryPlugin(Star):
             yield event.plain_result("🎨 正在渲染暗色主题卡片，马上就来...")
             image_path = await self.render_html_to_image(video_title, summary_data)
             
-            # 发送生成的图片
             yield event.image_result(image_path)
             
         except Exception as e:
@@ -88,7 +86,7 @@ class BilibiliSummaryPlugin(Star):
             model_name = "deepseek-chat"
 
         if not api_key:
-             raise Exception("未配置大模型的 API Key！请前往 AstrBot 管理面板 -> 插件配置 中填写。")
+             raise Exception("未配置 API Key！请前往后台插件配置填写。")
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -96,21 +94,15 @@ class BilibiliSummaryPlugin(Star):
         }
         
         system_prompt = (
-            "你是一个专业的B站视频内容总结助手。请根据用户提供的视频标题和简介，"
-            "提取出视频的核心内容和关键信息。\n"
-            "你必须严格以 JSON 格式输出，不要包含任何额外的 Markdown 标记（如 ```json 等），"
-            "只需要纯 JSON 字符串。JSON 结构必须如下：\n"
-            "{\n"
-            '  "core": "用一两句话概括视频的核心主题",\n'
-            '  "points": ["要点1", "要点2", "要点3"]\n'
-            "}"
+            "你是一个专业的B站视频总结助手。请根据标题和简介提取核心内容和要点。\n"
+            "严格以纯 JSON 格式输出，结构：{\"core\": \"...\", \"points\": [\"...\", \"...\"]}"
         )
         
         payload = {
             "model": model_name,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"视频标题：{title}\n视频简介：{text}"}
+                {"role": "user", "content": f"标题：{title}\n简介：{text}"}
             ],
             "temperature": 0.7 
         }
@@ -119,22 +111,37 @@ class BilibiliSummaryPlugin(Star):
             async with session.post(api_url, headers=headers, json=payload) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    raise Exception(f"大模型 API 请求失败: {error_text}")
+                    raise Exception(f"API 请求失败: {error_text}")
                 
                 result = await response.json()
                 content = result['choices'][0]['message']['content']
                 
                 try:
                     content = content.replace("```json", "").replace("```", "").strip()
-                    summary_dict = json.loads(content)
-                    return summary_dict
+                    return json.loads(content)
                 except json.JSONDecodeError:
-                    raise Exception("大模型没有按规定返回 JSON 格式。返回内容：" + content)
+                    raise Exception("AI 返回格式非 JSON，内容：" + content)
 
     async def render_html_to_image(self, title: str, summary: dict) -> str:
         def _render():
-            # 针对 VPS 无头环境优化参数
-            hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'])
+            # ✨ 自动寻找浏览器路径
+            browser_path = None
+            possible_paths = [
+                "/usr/bin/chromium-browser",
+                "/usr/bin/chromium",
+                "/usr/bin/google-chrome",
+                "/snap/bin/chromium"
+            ]
+            for p in possible_paths:
+                if os.path.exists(p):
+                    browser_path = p
+                    break
+            
+            # 初始化渲染器，并传入浏览器路径和无头参数
+            hti = Html2Image(
+                browser_executable=browser_path,
+                custom_flags=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+            )
             hti.output_path = self.temp_dir
             
             filename = f"summary_{int(time.time())}.png"
@@ -149,61 +156,14 @@ class BilibiliSummaryPlugin(Star):
             <head>
                 <meta charset="utf-8">
                 <style>
-                    body {{
-                        background-color: #1e1e2e;
-                        color: #cdd6f4;
-                        font-family: 'sans-serif';
-                        padding: 40px;
-                        width: 720px;
-                        margin: 0;
-                        box-sizing: border-box;
-                    }}
-                    .container {{
-                        background: #181825;
-                        border-radius: 16px;
-                        padding: 30px;
-                        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-                        border: 1px solid #313244;
-                    }}
-                    h1 {{
-                        color: #89b4fa;
-                        font-size: 26px;
-                        margin-top: 0;
-                        border-bottom: 2px solid #313244;
-                        padding-bottom: 15px;
-                        line-height: 1.4;
-                    }}
-                    .section-title {{
-                        color: #f38ba8;
-                        font-size: 20px;
-                        margin-top: 25px;
-                        font-weight: bold;
-                    }}
-                    .core-text {{
-                        background: #313244;
-                        padding: 15px 20px;
-                        border-left: 5px solid #a6e3a1;
-                        border-radius: 8px;
-                        font-size: 18px;
-                        line-height: 1.6;
-                        margin-top: 15px;
-                    }}
-                    ul {{
-                        margin-top: 15px;
-                        padding-left: 25px;
-                    }}
-                    li {{
-                        font-size: 18px;
-                        line-height: 1.6;
-                        margin-bottom: 12px;
-                        color: #bac2de;
-                    }}
-                    .footer {{
-                        margin-top: 30px;
-                        text-align: right;
-                        color: #6c7086;
-                        font-size: 14px;
-                    }}
+                    body {{ background-color: #1e1e2e; color: #cdd6f4; font-family: sans-serif; padding: 40px; width: 720px; margin: 0; box-sizing: border-box; }}
+                    .container {{ background: #181825; border-radius: 16px; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #313244; }}
+                    h1 {{ color: #89b4fa; font-size: 26px; margin-top: 0; border-bottom: 2px solid #313244; padding-bottom: 15px; line-height: 1.4; }}
+                    .section-title {{ color: #f38ba8; font-size: 20px; margin-top: 25px; font-weight: bold; }}
+                    .core-text {{ background: #313244; padding: 15px 20px; border-left: 5px solid #a6e3a1; border-radius: 8px; font-size: 18px; line-height: 1.6; margin-top: 15px; }}
+                    ul {{ margin-top: 15px; padding-left: 25px; }}
+                    li {{ font-size: 18px; line-height: 1.6; margin-bottom: 12px; color: #bac2de; }}
+                    .footer {{ margin-top: 30px; text-align: right; color: #6c7086; font-size: 14px; }}
                 </style>
             </head>
             <body>
@@ -212,9 +172,7 @@ class BilibiliSummaryPlugin(Star):
                     <div class="section-title">🎯 核心提炼</div>
                     <div class="core-text">{core_text}</div>
                     <div class="section-title">💡 关键要点</div>
-                    <ul>
-                        {points_html}
-                    </ul>
+                    <ul>{points_html}</ul>
                     <div class="footer">🚀 Generated by AstrBot Bilibili Plugin</div>
                 </div>
             </body>
