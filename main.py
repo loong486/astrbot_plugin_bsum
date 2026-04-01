@@ -4,7 +4,7 @@ import aiohttp
 import re
 import json
 
-@register("bilibili_summary", "YourName", "B站视频总结插件", "1.0.0")
+@register("bilibili_summary", "YourName", "B站视频总结插件", "1.1.0")
 class BilibiliSummaryPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -13,7 +13,7 @@ class BilibiliSummaryPlugin(Star):
     @filter.command("bsum")
     async def bilibili_summary(self, event: AstrMessageEvent, url: str):
         '''生成B站视频总结。使用方法：/bsum <B站链接>'''
-        yield event.plain_result("⏳ 正在处理中，请稍候...")
+        yield event.plain_result("⏳ 正在获取视频信息与字幕，请稍候...")
         
         try:
             bvid = self.extract_bvid(url)
@@ -21,23 +21,34 @@ class BilibiliSummaryPlugin(Star):
                 yield event.plain_result("❌ 无法识别链接中的 BV 号。")
                 return
 
-            # 设置 30 秒全局超时，防止协程挂死
-            timeout = aiohttp.ClientTimeout(total=30)
+            timeout = aiohttp.ClientTimeout(total=45) # 增加了超时时间以应对长字幕拉取
             
-            # 复用同一个 ClientSession，提升网络请求效率
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                # 1. 抓取数据 (修改了方法名以准确表达功能)
-                text_content, video_title = await self.fetch_bilibili_info(session, bvid)
+                # 1. 抓取视频基础信息与字幕链接
+                text_content, video_title, subtitle_url = await self.fetch_bilibili_info(session, bvid)
                 
-                # 2. AI 总结
+                # 2. 尝试抓取并合并字幕内容
+                if subtitle_url:
+                    try:
+                        sub_text = await self.fetch_subtitle_content(session, subtitle_url)
+                        if sub_text:
+                            # 限制字幕长度，防止超出大模型 Token 限制 (设定20000字截断)
+                            if len(sub_text) > 20000:
+                                sub_text = sub_text[:20000] + "\n...(内容过长已截断)"
+                            text_content = f"【视频简介】\n{text_content}\n\n【视频完整字幕】\n{sub_text}"
+                    except Exception as e:
+                        logger.warning(f"Bilibili Summary: 抓取字幕失败，回退至纯简介模式。原因: {str(e)}")
+                else:
+                    text_content = f"【视频简介】\n{text_content}\n\n(注: 该视频无可用字幕)"
+
+                # 3. AI 总结
                 summary_data = await self.generate_summary_via_llm(session, text_content, video_title)
             
-            # 3. 格式化输出
+            # 4. 格式化输出
             result_text = self.format_summary(video_title, summary_data)
             yield event.plain_result(result_text)
             
         except Exception as e:
-            # 引入标准日志记录，保留完整堆栈信息以便排错
             logger.error(f"Bilibili Summary Plugin Error: {str(e)}", exc_info=True)
             yield event.plain_result(f"❌ 运行过程中出现错误：{str(e)}")
 
@@ -48,9 +59,8 @@ class BilibiliSummaryPlugin(Star):
         return match.group(1) if match else ""
 
     async def fetch_bilibili_info(self, session: aiohttp.ClientSession, bvid: str):
-        """获取 B 站视频标题和简介"""
+        """获取 B 站视频标题、简介和字幕链接"""
         api_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
-        # 使用现代浏览器 UA，防止被 WAF 拦截
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
         }
@@ -61,7 +71,41 @@ class BilibiliSummaryPlugin(Star):
                 raise Exception(f"B站 API 错误: {data.get('message')}")
             
             video_info = data['data']
-            return video_info['desc'] or "无简介", video_info['title']
+            title = video_info.get('title', '')
+            desc = video_info.get('desc', '无简介')
+            
+            # 提取字幕列表
+            subtitles = video_info.get('subtitle', {}).get('list', [])
+            subtitle_url = ""
+            if subtitles:
+                # 优先寻找中文或 AI 自动生成的字幕
+                for sub in subtitles:
+                    if 'zh' in sub.get('lan', '').lower():
+                        subtitle_url = sub.get('subtitle_url', '')
+                        break
+                # 如果没有中文，默认拿第一个字幕
+                if not subtitle_url and len(subtitles) > 0:
+                    subtitle_url = subtitles[0].get('subtitle_url', '')
+                    
+            # 补全 https 协议头
+            if subtitle_url and subtitle_url.startswith("//"):
+                subtitle_url = "https:" + subtitle_url
+                
+            return desc, title, subtitle_url
+
+    async def fetch_subtitle_content(self, session: aiohttp.ClientSession, subtitle_url: str) -> str:
+        """从字幕 JSON 文件中提取纯文本字幕内容"""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        async with session.get(subtitle_url, headers=headers) as resp:
+            # content_type=None 允许解析 B 站 CDN 返回的 text/plain 格式 JSON
+            data = await resp.json(content_type=None) 
+            body = data.get('body', [])
+            
+            # 提取并拼接所有字幕片段
+            texts = [item.get('content', '') for item in body]
+            return " ".join(texts)
 
     async def generate_summary_via_llm(self, session: aiohttp.ClientSession, text: str, title: str) -> dict:
         """调用大语言模型进行总结并返回 JSON 数据"""
@@ -79,8 +123,8 @@ class BilibiliSummaryPlugin(Star):
         payload = {
             "model": model_name,
             "messages": [
-                {"role": "system", "content": "你是一个视频总结专家，请以JSON格式返回: {\"core\": \"...\", \"points\": [\"...\", \"...\"]}"},
-                {"role": "user", "content": f"标题: {title}\n简介: {text}"}
+                {"role": "system", "content": "你是一个视频总结专家。请根据提供的视频标题、简介以及完整字幕，提炼出视频的核心内容和关键要点。请以JSON格式返回: {\"core\": \"<核心总结文字>\", \"points\": [\"<要点1>\", \"<要点2>\"]}"},
+                {"role": "user", "content": f"标题: {title}\n内容信息:\n{text}"}
             ],
             "response_format": {"type": "json_object"}
         }
@@ -89,16 +133,11 @@ class BilibiliSummaryPlugin(Star):
             result = await resp.json()
             content = result.get('choices', [{}])[0].get('message', {}).get('content', '')
             
-            # 清理可能存在的 Markdown 代码块标记
             content = content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
+            if content.startswith("```json"): content = content[7:]
+            if content.startswith("```"): content = content[3:]
+            if content.endswith("```"): content = content[:-3]
             
-            # JSON 解析容错处理
             try:
                 return json.loads(content.strip())
             except json.JSONDecodeError:
@@ -110,7 +149,6 @@ class BilibiliSummaryPlugin(Star):
         core = summary.get('core', '无')
         points = summary.get('points', [])
         
-        # 使用列表推导式和 join 拼接字符串，提升性能
         points_text = "\n".join([f"{i}. {point}" for i, point in enumerate(points, 1)])
         
         result = f"""📺 【{title}】
