@@ -123,8 +123,14 @@ class BilibiliSummaryPlugin(Star):
         payload = {
             "model": model_name,
             "messages": [
-                {"role": "system", "content": "你是一个视频总结专家。请根据提供的视频标题、简介以及完整字幕，提炼出视频的核心内容和关键要点。请以JSON格式返回: {\"core\": \"<核心总结文字>\", \"points\": [\"<要点1>\", \"<要点2>\"]}"},
-                {"role": "user", "content": f"标题: {title}\n内容信息:\n{text}"}
+                {
+                    "role": "system", 
+                    "content": "你是一个文本阅读和总结专家。我会直接为你提供视频的标题、简介以及完整的字幕文本。请你完全根据我提供的这些文本内容进行总结，不要尝试访问视频或进行任何解析。即使内容较短，也请尽力提炼。请严格以JSON格式返回: {\"core\": \"<核心总结文字>\", \"points\": [\"<要点1>\", \"<要点2>\"]}"
+                },
+                {
+                    "role": "user", 
+                    "content": f"请根据以下提取到的文本信息进行总结：\n\n【视频标题】: {title}\n\n【视频内容信息】:\n{text}"
+                }
             ],
             "response_format": {"type": "json_object"}
         }
