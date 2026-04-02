@@ -28,21 +28,27 @@ class BilibiliSummaryPlugin(Star):
                 text_content, video_title, subtitle_url = await self.fetch_bilibili_info(session, bvid)
                 
                 # 2. 尝试抓取并合并字幕内容
-                if subtitle_url:
-                    try:
-                        sub_text = await self.fetch_subtitle_content(session, subtitle_url)
-                        if sub_text:
-                            # 限制字幕长度，防止超出大模型 Token 限制 (设定20000字截断)
-                            if len(sub_text) > 20000:
-                                sub_text = sub_text[:20000] + "\n...(内容过长已截断)"
-                            text_content = f"【视频简介】\n{text_content}\n\n【视频完整字幕】\n{sub_text}"
-                    except Exception as e:
-                        logger.warning(f"Bilibili Summary: 抓取字幕失败，回退至纯简介模式。原因: {str(e)}")
-                else:
-                    text_content = f"【视频简介】\n{text_content}\n\n(注: 该视频无可用字幕)"
+                if not subtitle_url:
+                    yield event.plain_result("❌ 该视频无可用字幕。")
+                    return
+                
+                try:
+                    sub_text = await self.fetch_subtitle_content(session, subtitle_url)
+                    if not sub_text:
+                        yield event.plain_result("❌ 该视频无可用字幕。")
+                        return
+                    
+                    # 限制字幕长度，防止超出大模型 Token 限制 (设定20000字截断)
+                    if len(sub_text) > 20000:
+                        sub_text = sub_text[:20000] + "\n...(内容过长已截断)"
+                    text_content = f"【视频完整字幕】\n{sub_text}"
+                except Exception as e:
+                    logger.warning(f"Bilibili Summary: 抓取字幕失败。原因: {str(e)}")
+                    yield event.plain_result("❌ 该视频字幕抓取失败。")
+                    return
 
                 # 3. AI 总结
-                summary_data = await self.generate_summary_via_llm(session, text_content, video_title)
+                summary_data = await self.generate_summary_via_llm(event, text_content, video_title)
             
             # 4. 格式化输出
             result_text = self.format_summary(video_title, summary_data)
@@ -107,48 +113,42 @@ class BilibiliSummaryPlugin(Star):
             texts = [item.get('content', '') for item in body]
             return " ".join(texts)
 
-    async def generate_summary_via_llm(self, session: aiohttp.ClientSession, text: str, title: str) -> dict:
-        """调用大语言模型进行总结并返回 JSON 数据"""
-        api_key = self.config.get("llm_api_key", "").strip()
-        api_url = self.config.get("llm_api_url", "https://api.deepseek.com/v1/chat/completions")
-        model_name = self.config.get("llm_model_name", "deepseek-chat")
-
-        if not api_key:
-            raise Exception("请在插件配置中填写 API Key！")
-
-        headers = {
-            "Authorization": f"Bearer {api_key}", 
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": model_name,
-            "messages": [
-                {
-                    "role": "system", 
-                    "content": "你是一个文本阅读和总结专家。我会直接为你提供视频的标题、简介以及完整的字幕文本。请你完全根据我提供的这些文本内容进行总结，不要尝试访问视频或进行任何解析。即使内容较短，也请尽力提炼。请严格以JSON格式返回: {\"core\": \"<核心总结文字>\", \"points\": [\"<要点1>\", \"<要点2>\"]}"
-                },
-                {
-                    "role": "user", 
-                    "content": f"请根据以下提取到的文本信息进行总结：\n\n【视频标题】: {title}\n\n【视频内容信息】:\n{text}"
-                }
-            ],
-            "response_format": {"type": "json_object"}
-        }
+    async def generate_summary_via_llm(self, event: AstrMessageEvent, text: str, title: str) -> dict:
+        """调用 AstrBot 内置大模型进行总结并返回 JSON 数据"""
         
-        async with session.post(api_url, headers=headers, json=payload) as resp:
-            result = await resp.json()
-            content = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+        provider_id = self.config.get("llm_provider")
+        if not provider_id:
+            # 如果配置中留空，则默认使用当前对话会话分配的 provider
+            umo = event.unified_msg_origin
+            provider_id = await self.context.get_current_chat_provider_id(umo=umo)
             
-            content = content.strip()
-            if content.startswith("```json"): content = content[7:]
-            if content.startswith("```"): content = content[3:]
-            if content.endswith("```"): content = content[:-3]
-            
-            try:
-                return json.loads(content.strip())
-            except json.JSONDecodeError:
-                logger.error(f"大模型返回的 JSON 解析失败。原始内容: {content}")
-                raise Exception("大模型返回的数据格式异常，无法解析。")
+        if not provider_id:
+            raise Exception("未找到可用的大语言模型，请在 AstrBot 设置中配置并启用模型。")
+
+        prompt_template = self.config.get(
+            "prompt_template",
+            "你是一个文本阅读和总结专家。我会直接为你提供视频的标题以及完整的字幕文本。请你完全根据我提供的这些文本内容进行总结，不要尝试访问视频或进行任何解析。即使内容较短，也请尽力提炼。请严格以JSON格式返回: {\"core\": \"<核心总结文字>\", \"points\": [\"<要点1>\", \"<要点2>\"]}"
+        )
+
+        prompt = f"{prompt_template}\n\n【视频标题】: {title}\n\n【视频内容信息】:\n{text}"
+        
+        # 使用 AstrBot 统一生成接口
+        llm_resp = await self.context.llm_generate(
+            chat_provider_id=provider_id,
+            prompt=prompt
+        )
+        content = llm_resp.completion_text
+        
+        content = content.strip()
+        if content.startswith("```json"): content = content[7:]
+        if content.startswith("```"): content = content[3:]
+        if content.endswith("```"): content = content[:-3]
+        
+        try:
+            return json.loads(content.strip())
+        except json.JSONDecodeError:
+            logger.error(f"大模型返回的 JSON 解析失败。原始内容: {content}")
+            raise Exception("大模型返回的数据格式异常，无法解析。")
 
     def format_summary(self, title: str, summary: dict) -> str:
         """格式化总结输出为文字"""
