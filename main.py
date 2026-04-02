@@ -15,10 +15,14 @@ class BilibiliSummaryPlugin(Star):
         '''生成B站视频总结。自动检测B站链接或BV号触发。'''
         
         message_str = event.message_str
+        logger.info(f"Bilibili Summary: 检测到消息: {message_str}")
+        
         bvid = await self.extract_bvid(message_str)
         if not bvid:
+            logger.info("Bilibili Summary: 未从消息中提取到有效 BV 号，忽略。")
             return # 没匹配到BV号，直接忽略不处理
             
+        logger.info(f"Bilibili Summary: 提取到 BV 号: {bvid}")
         yield event.plain_result("⏳ 检测到 B 站视频，正在生成总结，请稍候...")
         
         try:
@@ -105,6 +109,7 @@ class BilibiliSummaryPlugin(Star):
 
     async def fetch_bilibili_info(self, session: aiohttp.ClientSession, bvid: str):
         """获取 B 站视频标题、简介和字幕链接"""
+        logger.info(f"Bilibili Summary: 正在获取视频信息, bvid={bvid}")
         api_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
@@ -143,11 +148,18 @@ class BilibiliSummaryPlugin(Star):
             # 补全 https 协议头
             if subtitle_url and subtitle_url.startswith("//"):
                 subtitle_url = "https:" + subtitle_url
+            
+            logger.info(f"Bilibili Summary: 获取到视频标题: {title}")
+            if subtitle_url:
+                logger.info(f"Bilibili Summary: 获取到字幕链接: {subtitle_url}")
+            else:
+                logger.info("Bilibili Summary: 未找到可用字幕链接。")
                 
             return desc, title, subtitle_url
 
     async def fetch_subtitle_content(self, session: aiohttp.ClientSession, subtitle_url: str) -> str:
         """从字幕 JSON 文件中提取纯文本字幕内容"""
+        logger.info(f"Bilibili Summary: 正在下载字幕: {subtitle_url}")
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
@@ -165,7 +177,9 @@ class BilibiliSummaryPlugin(Star):
             
             # 提取并拼接所有字幕片段
             texts = [item.get('content', '') for item in body]
-            return " ".join(texts)
+            full_text = " ".join(texts)
+            logger.info(f"Bilibili Summary: 字幕下载成功，总长度: {len(full_text)} 字。")
+            return full_text
 
     async def generate_summary_via_llm(self, event: AstrMessageEvent, text: str, title: str) -> dict:
         """调用 AstrBot 内置大模型进行总结并返回 JSON 数据"""
@@ -186,12 +200,14 @@ class BilibiliSummaryPlugin(Star):
 
         prompt = f"{prompt_template}\n\n【视频标题】: {title}\n\n【视频内容信息】:\n{text}"
         
+        logger.info(f"Bilibili Summary: 正在调用大模型进行总结, provider_id={provider_id}")
         # 使用 AstrBot 统一生成接口
         llm_resp = await self.context.llm_generate(
             chat_provider_id=provider_id,
             prompt=prompt
         )
         content = llm_resp.completion_text
+        logger.info("Bilibili Summary: 大模型返回总结成功。")
         
         content = content.strip()
         if content.startswith("```json"): content = content[7:]
