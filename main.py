@@ -10,12 +10,12 @@ class BilibiliSummaryPlugin(Star):
         super().__init__(context)
         self.config = config
     
-    @filter.regex(r"(?:bilibili\.com/video/|b23\.tv/|BV)[a-zA-Z0-9]+")
+    @filter.regex(r"(?i)(?:bilibili\.com/video/|b23\.tv/|BV[a-zA-Z0-9]+|av\d+)")
     async def bilibili_summary(self, event: AstrMessageEvent):
         '''生成B站视频总结。自动检测B站链接或BV号触发。'''
         
         message_str = event.message_str
-        bvid = self.extract_bvid(message_str)
+        bvid = await self.extract_bvid(message_str)
         if not bvid:
             return # 没匹配到BV号，直接忽略不处理
             
@@ -62,9 +62,46 @@ class BilibiliSummaryPlugin(Star):
 
     # ================= 核心功能实现 =================
     
-    def extract_bvid(self, url: str) -> str:
-        match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', url)
-        return match.group(1) if match else ""
+    async def extract_bvid(self, text: str) -> str:
+        """从文本中提取并解析真实的 BV 号（支持短链接、AV号等转换）"""
+        # 1. 尝试直接匹配 BV 号
+        match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', text)
+        if match:
+            return match.group(1)
+            
+        # 2. 尝试匹配 AV 号并转换
+        av_match = re.search(r'(?i)av(\d+)', text)
+        if av_match:
+            aid = av_match.group(1)
+            try:
+                api_url = f"https://api.bilibili.com/x/web-interface/view?aid={aid}"
+                headers = {"User-Agent": "Mozilla/5.0"}
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(api_url, headers=headers) as resp:
+                        data = await resp.json()
+                        if data.get('code') == 0:
+                            return data['data'].get('bvid', "")
+            except Exception as e:
+                logger.error(f"AV转BV失败: {str(e)}")
+                
+        # 3. 尝试匹配 b23.tv 短链接并解析
+        b23_match = re.search(r'https?://b23\.tv/[a-zA-Z0-9]+', text)
+        if b23_match:
+            short_url = b23_match.group(0)
+            try:
+                headers = {"User-Agent": "Mozilla/5.0"}
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(short_url, headers=headers, allow_redirects=False) as resp:
+                        if resp.status in [301, 302, 303, 307, 308]:
+                            location = resp.headers.get('Location', '')
+                            # 从重定向的 URL 中提取 BV 号
+                            bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', location)
+                            if bv_match:
+                                return bv_match.group(1)
+            except Exception as e:
+                logger.error(f"短链接解析失败: {str(e)}")
+                
+        return ""
 
     async def fetch_bilibili_info(self, session: aiohttp.ClientSession, bvid: str):
         """获取 B 站视频标题、简介和字幕链接"""
