@@ -23,7 +23,7 @@ class BilibiliSummaryPlugin(Star):
             return # 没匹配到BV号，直接忽略不处理
             
         logger.info(f"Bilibili Summary: 提取到 BV 号: {bvid}")
-        yield event.plain_result("⏳ 检测到 B 站视频，正在生成总结，请稍候...")
+        yield event.plain_result(f"⏳ 检测到视频: {bvid}\n正在获取视频详情...")
         
         try:
 
@@ -32,6 +32,7 @@ class BilibiliSummaryPlugin(Star):
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 # 1. 抓取视频基础信息与字幕链接
                 text_content, video_title, subtitle_url = await self.fetch_bilibili_info(session, bvid)
+                yield event.plain_result(f"✅ 成功获取视频: {video_title}\n正在寻找可用字幕...")
                 
                 # 2. 尝试抓取并合并字幕内容
                 if not subtitle_url:
@@ -44,17 +45,20 @@ class BilibiliSummaryPlugin(Star):
                         yield event.plain_result("❌ 该视频无可用字幕。")
                         return
                     
+                    yield event.plain_result(f"✅ 字幕下载成功 (约 {len(sub_text)} 字)\n正在调用 AI 进行总结...")
+                    
                     # 限制字幕长度，防止超出大模型 Token 限制 (设定20000字截断)
                     if len(sub_text) > 20000:
                         sub_text = sub_text[:20000] + "\n...(内容过长已截断)"
                     text_content = f"【视频完整字幕】\n{sub_text}"
                 except Exception as e:
                     logger.warning(f"Bilibili Summary: 抓取字幕失败。原因: {str(e)}")
-                    yield event.plain_result("❌ 该视频字幕抓取失败。")
+                    yield event.plain_result(f"❌ 字幕抓取异常: {str(e)}")
                     return
 
                 # 3. AI 总结
                 summary_data = await self.generate_summary_via_llm(event, text_content, video_title)
+                yield event.plain_result("🚀 AI 总结完成，正在生成卡片...")
             
             # 4. 格式化输出
             result_text = self.format_summary(video_title, summary_data)
