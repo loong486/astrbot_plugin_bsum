@@ -112,8 +112,11 @@ class BilibiliSummaryPlugin(Star):
         
         cookies = {}
         sessdata = self.config.get("bilibili_sessdata", "").strip()
+        bili_jct = self.config.get("bilibili_jct", "").strip()
         if sessdata:
             cookies["SESSDATA"] = sessdata
+        if bili_jct:
+            cookies["bili_jct"] = bili_jct
         
         async with session.get(api_url, headers=headers, cookies=cookies) as resp:
             data = await resp.json()

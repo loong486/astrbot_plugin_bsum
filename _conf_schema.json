@@ -4,6 +4,11 @@
     "type": "string",
     "default": ""
   },
+  "bilibili_jct": {
+    "description": "B站 bili_jct (CSRF Token) (可选)。配合 SESSDATA 使用，可解锁更多 AI 自动生成字幕的抓取权限",
+    "type": "string",
+    "default": ""
+  },
   "llm_provider": {
     "description": "选择用于总结的大语言模型（留空则默认使用当前会话的模型）",
     "type": "string",
