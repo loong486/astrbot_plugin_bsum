@@ -10,16 +10,18 @@ class BilibiliSummaryPlugin(Star):
         super().__init__(context)
         self.config = config
     
-    @filter.command("bsum")
-    async def bilibili_summary(self, event: AstrMessageEvent, url: str):
-        '''生成B站视频总结。使用方法：/bsum <B站链接>'''
-        yield event.plain_result("⏳ 正在获取视频信息与字幕，请稍候...")
+    @filter.regex(r"(?:bilibili\.com/video/|b23\.tv/|BV)[a-zA-Z0-9]+")
+    async def bilibili_summary(self, event: AstrMessageEvent):
+        '''生成B站视频总结。自动检测B站链接或BV号触发。'''
+        
+        message_str = event.message_str
+        bvid = self.extract_bvid(message_str)
+        if not bvid:
+            return # 没匹配到BV号，直接忽略不处理
+            
+        yield event.plain_result("⏳ 检测到 B 站视频，正在生成总结，请稍候...")
         
         try:
-            bvid = self.extract_bvid(url)
-            if not bvid:
-                yield event.plain_result("❌ 无法识别链接中的 BV 号。")
-                return
 
             timeout = aiohttp.ClientTimeout(total=45) # 增加了超时时间以应对长字幕拉取
             
