@@ -112,11 +112,32 @@ class BilibiliSummaryPlugin(Star):
         # 2. 短链接 b23.tv
         if 'b23.tv' in video_input:
             try:
+                # 确保短链接有协议头
+                if not video_input.startswith('http'):
+                    video_input = 'https://' + video_input
+
+                # 先尝试获取重定向地址（不跟随重定向）
                 async with session.get(video_input, allow_redirects=False) as resp:
                     if resp.status in [301, 302, 303, 307, 308]:
                         location = resp.headers.get('Location', '')
                         bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', location)
-                        return bv_match.group(1) if bv_match else None
+                        if bv_match:
+                            return bv_match.group(1)
+                        # 如果重定向地址中没有BV号，可能是跳转到中间页面，需要跟随重定向
+                        if location:
+                            video_input = location
+
+                # 如果上面没有返回，尝试跟随重定向获取最终页面
+                async with session.get(video_input, allow_redirects=True) as resp:
+                    final_url = str(resp.url)
+                    bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', final_url)
+                    if bv_match:
+                        return bv_match.group(1)
+                    # 尝试从响应内容中解析BV号
+                    text = await resp.text()
+                    bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', text)
+                    if bv_match:
+                        return bv_match.group(1)
             except Exception as e:
                 logger.error(f"解析短链接失败: {e}")
                 return None
