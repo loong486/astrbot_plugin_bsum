@@ -73,7 +73,12 @@ class BilibiliSummaryPlugin(Star):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
         }
         
-        async with session.get(api_url, headers=headers) as resp:
+        cookies = {}
+        sessdata = self.config.get("bilibili_sessdata", "").strip()
+        if sessdata:
+            cookies["SESSDATA"] = sessdata
+        
+        async with session.get(api_url, headers=headers, cookies=cookies) as resp:
             data = await resp.json()
             if data.get('code') != 0:
                 raise Exception(f"B站 API 错误: {data.get('message')}")
@@ -106,7 +111,14 @@ class BilibiliSummaryPlugin(Star):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-        async with session.get(subtitle_url, headers=headers) as resp:
+        
+        # 很多时候不需要 Cookie 也能拿字幕，但传了更保险
+        cookies = {}
+        sessdata = self.config.get("bilibili_sessdata", "").strip()
+        if sessdata:
+            cookies["SESSDATA"] = sessdata
+            
+        async with session.get(subtitle_url, headers=headers, cookies=cookies) as resp:
             # content_type=None 允许解析 B 站 CDN 返回的 text/plain 格式 JSON
             data = await resp.json(content_type=None) 
             body = data.get('body', [])

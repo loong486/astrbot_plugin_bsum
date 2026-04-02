@@ -33,11 +33,11 @@
 
 | 配置项          | 描述                                     | 是否必填 | 默认值                              |
 | -------------- | ---------------------------------------- | -------- | ----------------------------------- |
-| `llm_api_key`  | 大模型 API Key。                          | **是**   | `""`                                |
-| `llm_api_url`  | 大模型 API 接口地址。                     | 否       | `https://api.deepseek.com/v1/chat/completions` |
-| `llm_model_name`| 大模型名称。                               | 否       | `deepseek-chat`                     |
+| `bilibili_sessdata` | B站 SESSDATA，用于获取需登录才能看的字幕 | 否       | `""`                                |
+| `llm_provider`  | 选择用于总结的大语言模型（下拉框选择）    | 否       | *(留空则默认使用当前会话的模型)*    |
+| `prompt_template` | 系统提示词，用于指导大模型如何总结         | 否       | *(默认的 JSON 输出引导提示词)*      |
 
-> **提示**: 请确保填写的 API Key 拥有足够的额度，并且网络可以正常访问 API 地址。
+> **如何获取 SESSDATA**: 在电脑浏览器中登录 B 站，按 `F12` 打开开发者工具，进入 `Application` (应用) -> `Cookies`，找到 `SESSDATA` 的值并复制填入即可。
 
 ## 💡 使用方法
 

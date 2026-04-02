@@ -1,4 +1,9 @@
 {
+  "bilibili_sessdata": {
+    "description": "B站 SESSDATA (可选)。用于获取需要登录才能查看的字幕。在浏览器打开B站按F12 -> Application -> Cookies 中获取SESSDATA的值",
+    "type": "string",
+    "default": ""
+  },
   "llm_provider": {
     "description": "选择用于总结的大语言模型（留空则默认使用当前会话的模型）",
     "type": "string",
