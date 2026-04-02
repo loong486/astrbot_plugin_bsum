@@ -17,7 +17,7 @@ class BilibiliSummaryPlugin(Star):
         self.bilibili_jct = self.config.get("bilibili_jct", "").strip()
         self.max_subtitle_length = 20000 # 安全截断
     
-    @filter.regex(r"(?i)(?:bilibili\.com/video/|b23\.tv/|BV[a-zA-Z0-9]+|av\d+)")
+    @filter.regex(r"(?i)(?:(?:www\.|m\.)?bilibili\.com/video/|b23\.tv/|BV[1-9A-HJ-NP-Za-km-z]{10}|av\d+)")
     async def bilibili_summary(self, event: AstrMessageEvent):
         '''生成B站视频总结。自动检测B站链接或BV号触发。'''
         
@@ -44,7 +44,7 @@ class BilibiliSummaryPlugin(Star):
                 # 2. 解析为 BV 号
                 bvid = await self.resolve_video_id(session, video_input)
                 if not bvid:
-                    yield event.plain_result("❌ 无法解析视频 BV 号。")
+                    yield event.plain_result("❌ 无法解析视频 BV 号。\n请确保您发送的是一个有效的 B 站**视频**链接。")
                     return
 
                 # 3. 获取视频基本信息 (标题, aid, cid)
@@ -92,8 +92,8 @@ class BilibiliSummaryPlugin(Star):
     def extract_links_from_text(self, text: str) -> List[str]:
         """从文本中提取bilibili相关标识"""
         url_patterns = [
-            r'https?://(?:www\.)?bilibili\.com/video/[a-zA-Z0-9]+',
-            r'https?://b23\.tv/[a-zA-Z0-9]+',
+            r'https?://(?:www\.|m\.)?bilibili\.com/video/[^\s\'"<>]+',
+            r'https?://b23\.tv/[^\s\'"<>]+',
             r'BV[1-9A-HJ-NP-Za-km-z]{10}',
             r'(?i)av\d+',
         ]
