@@ -30,12 +30,6 @@ class BilibiliSummaryPlugin(Star):
         video_input = links[0]
         logger.info(f"Bilibili Summary: 提取到视频标识: {video_input}")
         
-        # 提取分P号
-        page_num = 1
-        p_match = re.search(r'[?&]p=(\d+)', video_input)
-        if p_match:
-            page_num = int(p_match.group(1))
-        
         yield event.plain_result(f"⏳ 检测到视频，正在获取详情...")
 
         try:
@@ -48,7 +42,7 @@ class BilibiliSummaryPlugin(Star):
                     return
 
                 # 3. 获取视频基本信息 (标题, aid, cid)
-                video_info = await self.get_video_info(session, bvid, page_num)
+                video_info = await self.get_video_info(session, bvid)
                 if not video_info:
                     yield event.plain_result("❌ 获取视频详情失败。")
                     return
@@ -57,7 +51,7 @@ class BilibiliSummaryPlugin(Star):
                 yield event.plain_result(f"✅ 成功获取视频: {video_title}\n正在寻找可用字幕...")
 
                 # 4. 获取字幕文本
-                subtitle_text = await self.get_subtitle(session, video_info['aid'], video_info['cid'], bvid, video_info.get('video_subtitles'))
+                subtitle_text = await self.get_subtitle(session, video_info['aid'], video_info['cid'], bvid)
                 if not subtitle_text:
                     yield event.plain_result("❌ 该视频无可用字幕。")
                     return
@@ -138,7 +132,7 @@ class BilibiliSummaryPlugin(Star):
 
     # ================= 核心抓取逻辑 =================
 
-    async def get_video_info(self, session: aiohttp.ClientSession, bvid: str, page: int = 1) -> Optional[Dict[str, Any]]:
+    async def get_video_info(self, session: aiohttp.ClientSession, bvid: str) -> Optional[Dict[str, Any]]:
         """获取视频基本信息"""
         api_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
         headers = {
@@ -153,72 +147,43 @@ class BilibiliSummaryPlugin(Star):
             data = await resp.json()
             if data.get('code') == 0:
                 vdata = data['data']
-                pages = vdata.get('pages', [])
-                cid = vdata.get('cid') # 默认取 P1
-                title = vdata.get('title', '')
-                
-                # 如果是多P视频，根据 page 参数获取对应的 cid
-                if len(pages) >= page:
-                    page_data = pages[page-1]
-                    cid = page_data.get('cid')
-                    # 如果是多P视频，标题加上分P名
-                    if len(pages) > 1:
-                        title = f"{title} (P{page} {page_data.get('part', '')})"
-                
-                # 获取视频级字幕作为备选
-                video_subtitles = vdata.get('subtitle', {}).get('list', [])
-                
                 return {
                     'aid': vdata.get('aid'),
-                    'cid': cid,
-                    'title': title,
-                    'desc': vdata.get('desc'),
-                    'video_subtitles': video_subtitles
+                    'cid': vdata.get('cid'),
+                    'title': vdata.get('title'),
+                    'desc': vdata.get('desc')
                 }
         return None
 
-    async def get_subtitle(self, session: aiohttp.ClientSession, aid: int, cid: int, bvid: str, fallback_subtitles: List[Dict] = None) -> Optional[str]:
-        """获取字幕内容，结合 player/v2 和 view 接口的返回结果"""
+    async def get_subtitle(self, session: aiohttp.ClientSession, aid: int, cid: int, bvid: str) -> Optional[str]:
+        """获取字幕内容，优先使用 player/v2 接口"""
         url = f"https://api.bilibili.com/x/player/v2?aid={aid}&cid={cid}&bvid={bvid}"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0",
             "Referer": "https://www.bilibili.com/"
         }
         cookies = {}
         if self.bilibili_sessdata: cookies["SESSDATA"] = self.bilibili_sessdata
         if self.bilibili_jct: cookies["bili_jct"] = self.bilibili_jct
 
-        selected_url = ""
-        
-        # 1. 尝试从 player/v2 获取字幕
-        try:
-            async with session.get(url, headers=headers, cookies=cookies) as resp:
-                data = await resp.json()
-                if data.get('code') == 0:
-                    subtitles = data.get('data', {}).get('subtitle', {}).get('subtitles', [])
-                    if subtitles:
-                        # 优先选择中文
-                        for sub in subtitles:
-                            if 'zh' in sub.get('lan', '').lower():
-                                selected_url = sub.get('subtitle_url', '')
-                                break
-                        if not selected_url: selected_url = subtitles[0].get('subtitle_url', '')
-        except Exception as e:
-            logger.warning(f"Bilibili Summary: player/v2 接口调用异常: {e}")
+        async with session.get(url, headers=headers, cookies=cookies) as resp:
+            data = await resp.json()
+            if data.get('code') != 0: return None
+            
+            subtitles = data.get('data', {}).get('subtitle', {}).get('subtitles', [])
+            if not subtitles: return None
 
-        # 2. 如果 player/v2 没拿到，尝试使用 fallback_subtitles (来自 view 接口)
-        if not selected_url and fallback_subtitles:
-            logger.info("Bilibili Summary: player/v2 未获取到字幕，尝试使用 view 接口备选字幕。")
-            for sub in fallback_subtitles:
+            # 优先选择中文
+            selected_url = ""
+            for sub in subtitles:
                 if 'zh' in sub.get('lan', '').lower():
                     selected_url = sub.get('subtitle_url', '')
                     break
-            if not selected_url: selected_url = fallback_subtitles[0].get('subtitle_url', '')
+            if not selected_url: selected_url = subtitles[0].get('subtitle_url', '')
 
-        if selected_url:
-            if selected_url.startswith("//"): selected_url = "https:" + selected_url
-            return await self.download_subtitle(session, selected_url)
-            
+            if selected_url:
+                if selected_url.startswith("//"): selected_url = "https:" + selected_url
+                return await self.download_subtitle(session, selected_url)
         return None
 
     async def download_subtitle(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
