@@ -1,5 +1,10 @@
 import asyncio
+import os
+import sys
 from typing import List
+
+# 确保插件自身目录在 sys.path 中，使 AstrBot 能找到 bilisu 子包
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import aiohttp
 from astrbot.api import logger
