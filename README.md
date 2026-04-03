@@ -6,7 +6,7 @@
 
 # AstrBot BiliBili 视频总结插件
 
-✨ 一款为 [AstrBot](https://github.com/Astreter/AstrBot) 设计的 Bilibili 视频总结插件，能够自动提取视频简介，并调用大语言模型（LLM）生成核心内容与关键要点总结。✨
+✨ 一款专为 AstrBot 设计的高性能 Bilibili 视频总结插件。它能自动识别链接、提取 CC 字幕、并利用大语言模型（LLM）生成结构化的核心内容与关键要点总结。✨
 
 </div>
 
