@@ -16,6 +16,7 @@ class BilibiliSummaryPlugin(Star):
         self.bilibili_sessdata = self.config.get("bilibili_sessdata", "").strip()
         self.bilibili_jct = self.config.get("bilibili_jct", "").strip()
         self.max_subtitle_length = 20000 # 安全截断
+        self.llm_context_budget = self.config.get("llm_context_budget", 3000)  # 预留给LLM上下文token数（粗估）
     
     @filter.regex(r"(?i)(?:(?:www\.|m\.)?bilibili\.com/video/|b23\.tv/|\bBV[1-9A-HJ-NP-Za-km-z]{10}\b|\bav\d+\b)")
     async def bilibili_summary(self, event: AstrMessageEvent):
@@ -73,7 +74,7 @@ class BilibiliSummaryPlugin(Star):
 
             # 4. 获取字幕文本
             try:
-                subtitle_text = await self.get_subtitle(
+                subtitle_text_raw = await self.get_subtitle(
                     session,
                     video_info["aid"],
                     video_info["cid"],
@@ -89,9 +90,11 @@ class BilibiliSummaryPlugin(Star):
                 yield event.plain_result("❌ 拉取字幕失败，请稍后再试。")
                 return
 
-            if not subtitle_text:
+            if not subtitle_text_raw:
                 yield event.plain_result("❌ 该视频无可用字幕。")
                 return
+
+            subtitle_text = self.budget_text_for_llm(subtitle_text_raw)
 
             yield event.plain_result(
                 f"✅ 字幕下载成功 (约 {len(subtitle_text)} 字)\n正在调用 AI 进行总结..."
@@ -174,17 +177,20 @@ class BilibiliSummaryPlugin(Star):
         return results
 
     def extract_links_from_text(self, text: str) -> List[str]:
-        """从文本中提取bilibili相关标识"""
+        """从文本中提取bilibili相关标识，按出现顺序返回"""
         url_patterns = [
-            r'https?://(?:www\.|m\.)?bilibili\.com/video/[^\s\'"<>]+',
-            r'https?://b23\.tv/[^\s\'"<>]+',
+            r'https?://(?:www\.|m\.)?bilibili\.com/video/(?:[^\s\'\"<>，。）\)!！\?？;；：:、])+',
+            r'https?://b23\.tv/(?:[^\s\'\"<>，。）\)!！\?？;；：:、])+',
             r'\bBV[1-9A-HJ-NP-Za-km-z]{10}\b',
             r'(?i)\bav\d+\b',
         ]
-        links = []
+        matches_with_pos: List[tuple] = []
         for pattern in url_patterns:
-            matches = re.findall(pattern, text)
-            links.extend(matches)
+            for match in re.finditer(pattern, text):
+                matches_with_pos.append((match.start(), match.group(0)))
+
+        matches_with_pos.sort(key=lambda x: x[0])
+        links = [m[1] for m in matches_with_pos]
         return links
 
     async def resolve_video_id(self, session: aiohttp.ClientSession, video_input: str) -> Optional[str]:
@@ -393,6 +399,24 @@ class BilibiliSummaryPlugin(Star):
                 full_text = full_text[:self.max_subtitle_length] + "..."
             return full_text
 
+    def budget_text_for_llm(self, text: str) -> str:
+        """根据LLM上下文预算动态截断摘要文本，避免超限。\n
+        粗估：文字 -> token 的比例约为 1:0.4（中文偏少）。
+        预留 prompt + output 空间，确保总token在安全范围内。
+        """
+        estimated_chars = self.llm_context_budget * 2.5
+        estimated_chars = int(estimated_chars)
+
+        if len(text) <= estimated_chars:
+            return text
+
+        truncated = text[:estimated_chars]
+        logger.info(
+            f"Bilibili Summary: 字幕长度超预算，"
+            f"原长 {len(text)} 字，截断到 {estimated_chars} 字。"
+        )
+        return truncated + "..."
+
     async def read_json_response(self, resp: aiohttp.ClientResponse, scene: str) -> Optional[Dict[str, Any]]:
         """统一处理HTTP状态与JSON解析异常，避免上游抖动放大。"""
         if resp.status < 200 or resp.status >= 300:
@@ -455,15 +479,29 @@ class BilibiliSummaryPlugin(Star):
         except json.JSONDecodeError:
             pass
 
-        # 允许存在前后说明文字，抽取第一个JSON对象。
-        match = re.search(r"\{[\s\S]*\}", cleaned)
+        # 允许存在前后说明文字，抽取第一个JSON对象（非贪婪）。
+        match = re.search(r"\{[\s\S]*?\}", cleaned)
         if match:
             candidate = self.sanitize_json_candidate(match.group(0))
             try:
                 obj = json.loads(candidate)
                 return obj if isinstance(obj, dict) else None
             except json.JSONDecodeError:
-                return None
+                pass
+
+        # 进一步尝试：从最后匹配的 } 向前回溯，找到对应的 {（处理多块情况）。
+        last_brace = cleaned.rfind("}")
+        if last_brace > 0:
+            for start_pos in range(last_brace - 1, -1, -1):
+                if cleaned[start_pos] == "{":
+                    candidate = cleaned[start_pos:last_brace + 1]
+                    candidate = self.sanitize_json_candidate(candidate)
+                    try:
+                        obj = json.loads(candidate)
+                        return obj if isinstance(obj, dict) else None
+                    except json.JSONDecodeError:
+                        continue
+
         return None
 
     def sanitize_json_candidate(self, candidate: str) -> str:
