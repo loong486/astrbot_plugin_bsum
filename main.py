@@ -1,11 +1,12 @@
-from astrbot.api.all import *
+from astrbot.api import logger
+from astrbot.api.all import AstrMessageEvent, Context, Star, register
 from astrbot.api.event import filter
 import aiohttp
 import re
 import json
-import asyncio
+import ast
 from typing import List, Optional, Dict, Any
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urljoin
 import astrbot.api.message_components as Comp
 
 @register("bilibili_summary", "YourName", "B站视频总结插件", "1.2.0")
@@ -34,7 +35,7 @@ class BilibiliSummaryPlugin(Star):
         page_num = 1
         p_match = re.search(r'[?&]p=(\d+)', video_input)
         if p_match:
-            page_num = int(p_match.group(1))
+            page_num = max(1, int(p_match.group(1)))
         
         yield event.plain_result(f"⏳ 检测到视频，正在获取详情...")
 
@@ -74,7 +75,7 @@ class BilibiliSummaryPlugin(Star):
             
         except Exception as e:
             logger.error(f"Bilibili Summary Plugin Error: {str(e)}", exc_info=True)
-            yield event.plain_result(f"❌ 运行过程中出现错误：{str(e)}")
+            yield event.plain_result("❌ 运行过程中出现错误，请稍后重试。")
 
     # ================= 辅助解析逻辑 =================
 
@@ -87,7 +88,39 @@ class BilibiliSummaryPlugin(Star):
             elif isinstance(component, Comp.Reply):
                 if hasattr(component, 'text') and component.text:
                     links.extend(self.extract_links_from_text(component.text))
+            # 兼容更多消息组件：扫描常见字段中的可见文本与URL。
+            links.extend(self.extract_links_from_component(component))
         return links
+
+    def extract_links_from_component(self, component: Any) -> List[str]:
+        """从非纯文本组件中尽可能提取链接或视频标识"""
+        candidates: List[str] = []
+        for attr in ("url", "text", "content", "title", "desc", "data"):
+            value = getattr(component, attr, None)
+            if isinstance(value, str):
+                candidates.append(value)
+            elif isinstance(value, dict):
+                candidates.extend(self._flatten_strings(value))
+            elif isinstance(value, list):
+                candidates.extend(self._flatten_strings(value))
+
+        links: List[str] = []
+        for text in candidates:
+            links.extend(self.extract_links_from_text(text))
+        return links
+
+    def _flatten_strings(self, value: Any) -> List[str]:
+        """递归提取容器中的字符串，用于兜底扫描链接"""
+        results: List[str] = []
+        if isinstance(value, str):
+            results.append(value)
+        elif isinstance(value, dict):
+            for v in value.values():
+                results.extend(self._flatten_strings(v))
+        elif isinstance(value, list):
+            for item in value:
+                results.extend(self._flatten_strings(item))
+        return results
 
     def extract_links_from_text(self, text: str) -> List[str]:
         """从文本中提取bilibili相关标识"""
@@ -120,6 +153,8 @@ class BilibiliSummaryPlugin(Star):
                 async with session.get(video_input, allow_redirects=False) as resp:
                     if resp.status in [301, 302, 303, 307, 308]:
                         location = resp.headers.get('Location', '')
+                        if location:
+                            location = urljoin(str(resp.url), location)
                         bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', location)
                         if bv_match:
                             return bv_match.group(1)
@@ -151,7 +186,9 @@ class BilibiliSummaryPlugin(Star):
             aid = av_match.group(1)
             api_url = f"https://api.bilibili.com/x/web-interface/view?aid={aid}"
             async with session.get(api_url) as resp:
-                data = await resp.json()
+                data = await self.read_json_response(resp, "resolve_video_id(aid)")
+                if not data:
+                    return None
                 if data.get('code') == 0:
                     return data['data'].get('bvid')
 
@@ -171,12 +208,15 @@ class BilibiliSummaryPlugin(Star):
         if self.bilibili_jct: cookies["bili_jct"] = self.bilibili_jct
 
         async with session.get(api_url, headers=headers, cookies=cookies) as resp:
-            data = await resp.json()
+            data = await self.read_json_response(resp, "get_video_info")
+            if not data:
+                return None
             if data.get('code') == 0:
                 vdata = data['data']
                 pages = vdata.get('pages', [])
                 cid = vdata.get('cid') # 默认取 P1
                 title = vdata.get('title', '')
+                page = max(1, page)
                 
                 # 如果是多P视频，根据 page 参数获取对应的 cid
                 if len(pages) >= page:
@@ -214,7 +254,9 @@ class BilibiliSummaryPlugin(Star):
         # 1. 尝试从 player/v2 获取字幕
         try:
             async with session.get(url, headers=headers, cookies=cookies) as resp:
-                data = await resp.json()
+                data = await self.read_json_response(resp, "get_subtitle(player/v2)")
+                if not data:
+                    data = {}
                 if data.get('code') == 0:
                     subtitles = data.get('data', {}).get('subtitle', {}).get('subtitles', [])
                     if subtitles:
@@ -245,13 +287,47 @@ class BilibiliSummaryPlugin(Star):
     async def download_subtitle(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
         """下载字幕 JSON 并转换为纯文本"""
         async with session.get(url) as resp:
-            data = await resp.json(content_type=None)
+            data = await self.read_json_response(resp, "download_subtitle")
+            if not data:
+                return None
             body = data.get('body', [])
-            texts = [item.get('content', '') for item in body]
+            if not isinstance(body, list):
+                logger.warning("Bilibili Summary: 字幕 body 结构异常，非 list。")
+                return None
+
+            texts: List[str] = []
+            for item in body:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get('content', '')
+                if isinstance(content, str) and content.strip():
+                    texts.append(content)
+
+            if not texts:
+                return None
+
             full_text = " ".join(texts)
             if len(full_text) > self.max_subtitle_length:
                 full_text = full_text[:self.max_subtitle_length] + "..."
             return full_text
+
+    async def read_json_response(self, resp: aiohttp.ClientResponse, scene: str) -> Optional[Dict[str, Any]]:
+        """统一处理HTTP状态与JSON解析异常，避免上游抖动放大。"""
+        if resp.status < 200 or resp.status >= 300:
+            logger.warning(f"Bilibili Summary: {scene} HTTP状态异常: {resp.status}")
+            return None
+
+        try:
+            data = await resp.json(content_type=None)
+        except Exception as e:
+            text = await resp.text()
+            logger.warning(f"Bilibili Summary: {scene} JSON解析失败: {e}; 响应片段: {text[:200]}")
+            return None
+
+        if not isinstance(data, dict):
+            logger.warning(f"Bilibili Summary: {scene} 返回结构异常，非 dict。")
+            return None
+        return data
 
     # ================= AI 与 格式化 =================
 
@@ -265,17 +341,53 @@ class BilibiliSummaryPlugin(Star):
         
         llm_resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
         content = llm_resp.completion_text.strip()
-        
-        # 清理 Markdown
-        if content.startswith("```json"): content = content[7:]
-        if content.startswith("```"): content = content[3:]
-        if content.endswith("```"): content = content[:-3]
-        
-        try:
-            return json.loads(content.strip())
-        except json.JSONDecodeError:
+
+        parsed = self.parse_llm_json(content)
+        if parsed is None:
             logger.error(f"大模型解析失败: {content}")
             raise Exception("大模型输出格式错误。")
+
+        core = parsed.get("core", "").strip() if isinstance(parsed.get("core"), str) else ""
+        points_raw = parsed.get("points", [])
+        points = points_raw if isinstance(points_raw, list) else []
+        points = [p for p in points if isinstance(p, str) and p.strip()]
+
+        if not core:
+            raise Exception("大模型输出缺少核心总结。")
+
+        return {
+            "core": core,
+            "points": points,
+        }
+
+    def parse_llm_json(self, content: str) -> Optional[Dict[str, Any]]:
+        """从LLM输出中提取JSON对象，容忍少量格式偏差。"""
+        cleaned = content.strip()
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
+        # 优先尝试直接按JSON解析。
+        try:
+            obj = json.loads(cleaned)
+            return obj if isinstance(obj, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+        # 允许存在前后说明文字，抽取第一个JSON对象。
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        if match:
+            candidate = match.group(0)
+            try:
+                obj = json.loads(candidate)
+                return obj if isinstance(obj, dict) else None
+            except json.JSONDecodeError:
+                # 回退支持单引号字典样式。
+                try:
+                    obj = ast.literal_eval(candidate)
+                    return obj if isinstance(obj, dict) else None
+                except (ValueError, SyntaxError):
+                    return None
+        return None
 
     def format_summary(self, title: str, summary: dict) -> str:
         core = summary.get('core', '无')
