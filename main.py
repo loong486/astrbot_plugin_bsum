@@ -73,11 +73,18 @@ class BilibiliSummaryPlugin(Star):
             yield event.plain_result(f"✅ 成功获取视频: {video_title}\n正在寻找可用字幕...")
 
             # 4. 获取字幕文本
+            aid = video_info.get("aid")
+            cid = video_info.get("cid")
+            if not aid or not cid:
+                logger.error(f"Bilibili Summary: 视频信息不完整 bvid={bvid} aid={aid} cid={cid}")
+                yield event.plain_result("❌ 获取视频信息不完整，无法继续处理。")
+                return
+
             try:
                 subtitle_text_raw = await self.get_subtitle(
                     session,
-                    video_info["aid"],
-                    video_info["cid"],
+                    aid,
+                    cid,
                     bvid,
                     video_info.get("video_subtitles"),
                 )
@@ -179,8 +186,8 @@ class BilibiliSummaryPlugin(Star):
     def extract_links_from_text(self, text: str) -> List[str]:
         """从文本中提取bilibili相关标识，按出现顺序返回"""
         url_patterns = [
-            r'https?://(?:www\.|m\.)?bilibili\.com/video/(?:[^\s\'\"<>，。）\)!！\?？;；：:、])+',
-            r'https?://b23\.tv/(?:[^\s\'\"<>，。）\)!！\?？;；：:、])+',
+            r'https?://(?:www\.|m\.)?bilibili\.com/video/[^\s，。）\)!！\?？;；：:、]+',
+            r'https?://b23\.tv/[^\s，。）\)!！\?？;；：:、]+',
             r'\bBV[1-9A-HJ-NP-Za-km-z]{10}\b',
             r'(?i)\bav\d+\b',
         ]
@@ -236,7 +243,8 @@ class BilibiliSummaryPlugin(Star):
 
         # 3. 完整链接或 av 号
         bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', video_input)
-        if bv_match: return bv_match.group(1)
+        if bv_match:
+            return bv_match.group(1)
 
         av_match = re.search(r'(?i)\bav(\d+)\b', video_input)
         if av_match:
@@ -315,8 +323,10 @@ class BilibiliSummaryPlugin(Star):
             "Referer": "https://www.bilibili.com/"
         }
         cookies = {}
-        if self.bilibili_sessdata: cookies["SESSDATA"] = self.bilibili_sessdata
-        if self.bilibili_jct: cookies["bili_jct"] = self.bilibili_jct
+        if self.bilibili_sessdata:
+            cookies["SESSDATA"] = self.bilibili_sessdata
+        if self.bilibili_jct:
+            cookies["bili_jct"] = self.bilibili_jct
 
         selected_url = ""
         
@@ -334,7 +344,8 @@ class BilibiliSummaryPlugin(Star):
                             if 'zh' in sub.get('lan', '').lower():
                                 selected_url = sub.get('subtitle_url', '')
                                 break
-                        if not selected_url: selected_url = subtitles[0].get('subtitle_url', '')
+                        if not selected_url:
+                            selected_url = subtitles[0].get('subtitle_url', '')
         except Exception as e:
             logger.warning(f"Bilibili Summary: player/v2 接口调用异常: {e}")
 
@@ -345,10 +356,12 @@ class BilibiliSummaryPlugin(Star):
                 if 'zh' in sub.get('lan', '').lower():
                     selected_url = sub.get('subtitle_url', '')
                     break
-            if not selected_url: selected_url = fallback_subtitles[0].get('subtitle_url', '')
+            if not selected_url:
+                selected_url = fallback_subtitles[0].get('subtitle_url', '')
 
         if selected_url:
-            if selected_url.startswith("//"): selected_url = "https:" + selected_url
+            if selected_url.startswith("//"):
+                selected_url = "https:" + selected_url
             if not self.is_allowed_subtitle_url(selected_url):
                 logger.warning(f"Bilibili Summary: 字幕URL不在白名单内: {selected_url}")
                 return None
@@ -467,7 +480,7 @@ class BilibiliSummaryPlugin(Star):
         }
 
     def parse_llm_json(self, content: str) -> Optional[Dict[str, Any]]:
-        """从LLM输出中提取JSON对象，仅接受严格JSON。"""
+        """从LLM输出中提取JSON对象，仅接受严格JSON，使用嵌套括号匹配。"""
         cleaned = content.strip()
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -479,28 +492,50 @@ class BilibiliSummaryPlugin(Star):
         except json.JSONDecodeError:
             pass
 
-        # 允许存在前后说明文字，抽取第一个JSON对象（非贪婪）。
-        match = re.search(r"\{[\s\S]*?\}", cleaned)
-        if match:
-            candidate = self.sanitize_json_candidate(match.group(0))
+        # 使用嵌套括号匹配找JSON对象，正确处理字符串中的特殊字符。
+        json_obj = self.extract_json_object(cleaned)
+        if json_obj:
+            candidate = self.sanitize_json_candidate(json_obj)
             try:
                 obj = json.loads(candidate)
                 return obj if isinstance(obj, dict) else None
             except json.JSONDecodeError:
                 pass
 
-        # 进一步尝试：从最后匹配的 } 向前回溯，找到对应的 {（处理多块情况）。
-        last_brace = cleaned.rfind("}")
-        if last_brace > 0:
-            for start_pos in range(last_brace - 1, -1, -1):
-                if cleaned[start_pos] == "{":
-                    candidate = cleaned[start_pos:last_brace + 1]
-                    candidate = self.sanitize_json_candidate(candidate)
-                    try:
-                        obj = json.loads(candidate)
-                        return obj if isinstance(obj, dict) else None
-                    except json.JSONDecodeError:
-                        continue
+        return None
+
+    def extract_json_object(self, text: str) -> Optional[str]:
+        """智能查找JSON对象边界，处理嵌套{}、字符串中的特殊字符。"""
+        first_brace = text.find("{")
+        if first_brace == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+
+        for i in range(first_brace, len(text)):
+            char = text[i]
+
+            if escape:
+                escape = False
+                continue
+
+            if char == "\\":
+                escape = True
+                continue
+
+            if char == '"' and not escape:
+                in_string = not in_string
+                continue
+
+            if not in_string:
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[first_brace:i + 1]
 
         return None
 
@@ -511,5 +546,9 @@ class BilibiliSummaryPlugin(Star):
     def format_summary(self, title: str, summary: dict) -> str:
         core = summary.get('core', '无')
         points = summary.get('points', [])
-        points_text = "\n".join([f"{i}. {point}" for i, point in enumerate(points, 1)])
-        return f"📺 【{title}】\n\n📌 核心内容：\n{core}\n\n✨ 关键要点：\n{points_text}"
+        if points:
+            points_text = "\n".join([f"{i}. {point}" for i, point in enumerate(points, 1)])
+            points_section = f"✨ 关键要点：\n{points_text}"
+        else:
+            points_section = "✨ 关键要点：暂无额外要点"
+        return f"📺 【{title}】\n\n📌 核心内容：\n{core}\n\n{points_section}"
