@@ -393,9 +393,15 @@ class BilibiliSummaryPlugin(Star):
                         logger.warning(f"Bilibili Summary: 短链跳转目标不在白名单内: {current_url}")
                         return None
 
+                    # 如果当前 URL 已包含 BV 号（如 bilibili.com/video/BVxxx），直接提取，无需再发请求
+                    bv_early = self.BVID_SEARCH_PATTERN.search(current_url)
+                    if bv_early and 'b23.tv' not in current_url:
+                        return self.normalize_bvid_prefix(bv_early.group(1))
+
                     async with session.get(
                         current_url,
                         allow_redirects=False,
+                        headers=self.build_bilibili_headers(),
                         ssl=True,
                         timeout=aiohttp.ClientTimeout(total=self.short_link_timeout),
                     ) as resp:
