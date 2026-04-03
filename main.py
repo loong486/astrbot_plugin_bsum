@@ -283,11 +283,57 @@ class BilibiliSummaryPlugin(Star):
         links = [m[1] for m in matches_with_pos]
         return links
 
+    def extract_video_id_from_url(self, video_input: str) -> Optional[str]:
+        """优先从完整 bilibili URL 的路径中提取视频 ID，避免正则误命中。"""
+        if not video_input.startswith(("http://", "https://")):
+            return None
+
+        parsed = urlparse(video_input)
+        host = (parsed.hostname or "").lower()
+        if host not in {"bilibili.com", "www.bilibili.com", "m.bilibili.com"}:
+            return None
+
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if len(path_parts) < 2 or path_parts[0] != "video":
+            return None
+
+        candidate = path_parts[1].strip()
+        if self.BVID_STRICT_PATTERN.match(candidate):
+            return candidate.upper()
+
+        av_match = self.AV_SEARCH_PATTERN.fullmatch(candidate)
+        if av_match:
+            return f"av{av_match.group(1)}"
+
+        return None
+
+    def format_bilibili_api_error(self, scene: str, data: Dict[str, Any]) -> str:
+        """将 B 站接口业务错误转换为用户可理解的错误信息。"""
+        code = data.get("code")
+        message = data.get("message") or data.get("msg") or "未知错误"
+        logger.warning(
+            f"Bilibili Summary: {scene} 返回业务错误 code={code} message={message}"
+        )
+
+        if code in {-400, -404, 62002}:
+            return "视频不存在或链接解析出的标识无效。"
+        if code in {-352, -412}:
+            return "B站接口触发了风控或请求限制，请稍后重试。"
+        if code == 403:
+            return "当前账号或网络环境无权限访问该视频信息。"
+        return f"获取视频信息失败：{message}"
+
     async def resolve_video_id(self, session: aiohttp.ClientSession, video_input: str) -> Optional[str]:
         """将各种输入格式统一解析为 BV 号，修复短链冗余与死循环风险"""
         # 1. 已经是 BV 号
         if self.BVID_STRICT_PATTERN.match(video_input):
             return video_input.upper()
+
+        normalized_video_id = self.extract_video_id_from_url(video_input)
+        if normalized_video_id:
+            if normalized_video_id.upper().startswith("BV"):
+                return normalized_video_id.upper()
+            video_input = normalized_video_id
         
         # 2. 短链接 b23.tv - 手动逐跳跟随并校验目标域
         if 'b23.tv' in video_input:
@@ -358,10 +404,7 @@ class BilibiliSummaryPlugin(Star):
                     return None
                 if data.get('code') == 0:
                     return data['data'].get('bvid')
-                logger.warning(
-                    "Bilibili Summary: resolve_video_id(aid) 返回业务错误 "
-                    f"code={data.get('code')} message={data.get('message') or data.get('msg')}"
-                )
+                self.format_bilibili_api_error("resolve_video_id(aid)", data)
 
         return None
 
@@ -420,10 +463,9 @@ class BilibiliSummaryPlugin(Star):
                     'desc': vdata.get('desc'),
                     'video_subtitles': video_subtitles
                 }
-            logger.warning(
-                "Bilibili Summary: get_video_info 返回业务错误 "
-                f"code={data.get('code')} message={data.get('message') or data.get('msg')}"
-            )
+            return {
+                "error": self.format_bilibili_api_error("get_video_info", data)
+            }
         return None
 
     async def get_subtitle(
