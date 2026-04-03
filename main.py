@@ -11,13 +11,76 @@ import astrbot.api.message_components as Comp
 
 @register("bilibili_summary", "YourName", "B站视频总结插件", "1.2.0")
 class BilibiliSummaryPlugin(Star):
+    PAGE_PARAM_PATTERN = re.compile(r"[?&]p=(\d+)")
+    BVID_STRICT_PATTERN = re.compile(r"(?i)^BV[1-9A-HJ-NP-Za-km-z]{10}$")
+    BVID_SEARCH_PATTERN = re.compile(r"(?i)(BV[1-9A-HJ-NP-Za-km-z]{10})")
+    BV_TEXT_PATTERN = re.compile(r"(?i)bv[1-9A-HJ-NP-Za-km-z]{10}")
+    AV_SEARCH_PATTERN = re.compile(r"(?i)\bav(\d+)\b")
+    DEFAULT_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.bilibili.com/",
+    }
+    ALLOWED_SUBTITLE_HOSTS = {
+        "bilibili.com",
+        "www.bilibili.com",
+        "m.bilibili.com",
+        "bilivideo.com",
+        "www.bilivideo.com",
+        "hdslb.com",
+        "www.hdslb.com",
+    }
+    ALLOWED_VIDEO_HOSTS = {
+        "b23.tv",
+        "www.b23.tv",
+        "bilibili.com",
+        "www.bilibili.com",
+        "m.bilibili.com",
+    }
+
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         self.bilibili_sessdata = self.config.get("bilibili_sessdata", "").strip()
         self.bilibili_jct = self.config.get("bilibili_jct", "").strip()
-        self.max_subtitle_length = 20000 # 安全截断
-        self.llm_context_budget = self.config.get("llm_context_budget", 3000)  # 预留给LLM上下文token数（粗估）
+        self.max_subtitle_length = self.get_int_config(
+            "max_subtitle_length",
+            default=20000,
+            min_value=1000,
+            max_value=100000,
+        )
+        self.llm_context_budget = self.get_int_config(
+            "llm_context_budget",
+            default=3000,
+            min_value=512,
+            max_value=16000,
+        )
+        self.page_upper_bound = self.get_int_config(
+            "page_upper_bound",
+            default=1000,
+            min_value=1,
+            max_value=100000,
+        )
+        self.request_timeout = self.get_int_config(
+            "request_timeout",
+            default=45,
+            min_value=5,
+            max_value=120,
+        )
+        self.short_link_timeout = self.get_int_config(
+            "short_link_timeout",
+            default=10,
+            min_value=3,
+            max_value=30,
+        )
+        self.short_link_redirect_limit = self.get_int_config(
+            "short_link_redirect_limit",
+            default=5,
+            min_value=1,
+            max_value=10,
+        )
     
     @filter.regex(r"(?i)(?:(?:www\.|m\.)?bilibili\.com/video/|b23\.tv/|\bBV[1-9A-HJ-NP-Za-km-z]{10}\b|\bav\d+\b)")
     async def bilibili_summary(self, event: AstrMessageEvent):
@@ -34,19 +97,21 @@ class BilibiliSummaryPlugin(Star):
         
         # 提取分P号
         page_num = 1
-        p_match = re.search(r'[?&]p=(\d+)', video_input)
+        p_match = self.PAGE_PARAM_PATTERN.search(video_input)
         if p_match:
             raw_page = int(p_match.group(1))
             # 防护：页码不合理时回退到 P1
-            page_num = max(1, min(raw_page, 1000))
+            page_num = max(1, min(raw_page, self.page_upper_bound))
         
         yield event.plain_result(f"⏳ 检测到视频，正在获取详情...")
 
-        timeout = aiohttp.ClientTimeout(total=45)
+        timeout = aiohttp.ClientTimeout(total=self.request_timeout)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             # 2. 解析为 BV 号
             try:
                 bvid = await self.resolve_video_id(session, video_input)
+            except asyncio.CancelledError:
+                raise
             except asyncio.TimeoutError:
                 logger.warning("Bilibili Summary stage=resolve_video_id timeout")
                 yield event.plain_result("❌ 解析视频标识超时，请稍后重试。")
@@ -63,6 +128,8 @@ class BilibiliSummaryPlugin(Star):
             # 3. 获取视频基本信息 (标题, aid, cid)
             try:
                 video_info = await self.get_video_info(session, bvid, page_num)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"Bilibili Summary stage=get_video_info bvid={bvid} error={type(e).__name__}")
                 yield event.plain_result("❌ 获取视频详情失败，请稍后再试。")
@@ -95,6 +162,8 @@ class BilibiliSummaryPlugin(Star):
                     bvid,
                     video_info.get("video_subtitles"),
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"Bilibili Summary stage=get_subtitle bvid={bvid} "
@@ -116,6 +185,8 @@ class BilibiliSummaryPlugin(Star):
             # 5. 调用 AI 总结
             try:
                 summary_data = await self.generate_summary_via_llm(event, subtitle_text, video_title)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"Bilibili Summary stage=llm_generate bvid={bvid} error={type(e).__name__}")
                 yield event.plain_result("❌ AI 总结生成失败，请稍后重试。")
@@ -197,13 +268,16 @@ class BilibiliSummaryPlugin(Star):
         url_patterns = [
             r'https?://(?:www\.|m\.)?bilibili\.com/video/[^\s，。）\)!！\?？;；：:、]+',
             r'https?://b23\.tv/[^\s，。）\)!！\?？;；：:、]+',
-            r'\bBV[1-9A-HJ-NP-Za-km-z]{10}\b',
+            r'(?i)\bbv[1-9A-HJ-NP-Za-km-z]{10}\b',
             r'(?i)\bav\d+\b',
         ]
         matches_with_pos: List[tuple] = []
         for pattern in url_patterns:
             for match in re.finditer(pattern, text):
-                matches_with_pos.append((match.start(), match.group(0)))
+                matched_text = match.group(0)
+                if self.BV_TEXT_PATTERN.fullmatch(matched_text):
+                    matched_text = matched_text.upper()
+                matches_with_pos.append((match.start(), matched_text))
 
         matches_with_pos.sort(key=lambda x: x[0])
         links = [m[1] for m in matches_with_pos]
@@ -212,31 +286,57 @@ class BilibiliSummaryPlugin(Star):
     async def resolve_video_id(self, session: aiohttp.ClientSession, video_input: str) -> Optional[str]:
         """将各种输入格式统一解析为 BV 号，修复短链冗余与死循环风险"""
         # 1. 已经是 BV 号
-        if re.match(r'^BV[1-9A-HJ-NP-Za-km-z]{10}$', video_input):
-            return video_input
+        if self.BVID_STRICT_PATTERN.match(video_input):
+            return video_input.upper()
         
-        # 2. 短链接 b23.tv - 只做一次完整重定向+内容扫描，避免冗余
+        # 2. 短链接 b23.tv - 手动逐跳跟随并校验目标域
         if 'b23.tv' in video_input:
             try:
                 if not video_input.startswith('http'):
                     video_input = 'https://' + video_input
-                
-                # 设置最大重定向深度为 5（由 aiohttp 内部管理）
-                async with session.get(video_input, allow_redirects=True, ssl=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status < 200 or resp.status >= 400:
-                        logger.warning(f"Bilibili Summary: 短链接请求异常 status={resp.status}")
+
+                current_url = video_input
+                for _ in range(self.short_link_redirect_limit):
+                    if not self.is_allowed_video_url(current_url):
+                        logger.warning(f"Bilibili Summary: 短链跳转目标不在白名单内: {current_url}")
                         return None
-                    
-                    final_url = str(resp.url)
-                    bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', final_url)
-                    if bv_match:
-                        return bv_match.group(1)
-                    
-                    # 从页面内容扫描
-                    text = await resp.text()
-                    bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', text)
-                    if bv_match:
-                        return bv_match.group(1)
+
+                    async with session.get(
+                        current_url,
+                        allow_redirects=False,
+                        ssl=True,
+                        timeout=aiohttp.ClientTimeout(total=self.short_link_timeout),
+                    ) as resp:
+                        if resp.status in [301, 302, 303, 307, 308]:
+                            location = resp.headers.get("Location", "")
+                            if not location:
+                                return None
+                            current_url = urljoin(str(resp.url), location)
+                            continue
+
+                        if resp.status < 200 or resp.status >= 400:
+                            logger.warning(f"Bilibili Summary: 短链接请求异常 status={resp.status}")
+                            return None
+
+                        final_url = str(resp.url)
+                        if not self.is_allowed_video_url(final_url):
+                            logger.warning(f"Bilibili Summary: 短链最终目标不在白名单内: {final_url}")
+                            return None
+
+                        bv_match = self.BVID_SEARCH_PATTERN.search(final_url)
+                        if bv_match:
+                            return bv_match.group(1).upper()
+
+                        text = await resp.text()
+                        bv_match = self.BVID_SEARCH_PATTERN.search(text)
+                        if bv_match:
+                            return bv_match.group(1).upper()
+                        return None
+
+                logger.warning("Bilibili Summary: 短链跳转次数超限")
+                return None
+            except asyncio.CancelledError:
+                raise
             except asyncio.TimeoutError:
                 logger.warning("Bilibili Summary: 短链接解析超时")
             except Exception as e:
@@ -244,11 +344,11 @@ class BilibiliSummaryPlugin(Star):
             return None
 
         # 3. 完整链接或 av 号
-        bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', video_input)
+        bv_match = self.BVID_SEARCH_PATTERN.search(video_input)
         if bv_match:
-            return bv_match.group(1)
+            return bv_match.group(1).upper()
 
-        av_match = re.search(r'(?i)\bav(\d+)\b', video_input)
+        av_match = self.AV_SEARCH_PATTERN.search(video_input)
         if av_match:
             aid = av_match.group(1)
             api_url = f"https://api.bilibili.com/x/web-interface/view?aid={aid}"
@@ -258,21 +358,33 @@ class BilibiliSummaryPlugin(Star):
                     return None
                 if data.get('code') == 0:
                     return data['data'].get('bvid')
+                logger.warning(
+                    "Bilibili Summary: resolve_video_id(aid) 返回业务错误 "
+                    f"code={data.get('code')} message={data.get('message') or data.get('msg')}"
+                )
 
         return None
+
+    def build_bilibili_headers(self) -> Dict[str, str]:
+        """构造统一的 B 站请求头。"""
+        return dict(self.DEFAULT_HEADERS)
+
+    def build_bilibili_cookies(self) -> Dict[str, str]:
+        """根据配置构造统一的 B 站请求 Cookie。"""
+        cookies: Dict[str, str] = {}
+        if self.bilibili_sessdata:
+            cookies["SESSDATA"] = self.bilibili_sessdata
+        if self.bilibili_jct:
+            cookies["bili_jct"] = self.bilibili_jct
+        return cookies
 
     # ================= 核心抓取逻辑 =================
 
     async def get_video_info(self, session: aiohttp.ClientSession, bvid: str, page: int = 1) -> Optional[Dict[str, Any]]:
         """获取视频基本信息"""
         api_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Referer": "https://www.bilibili.com/"
-        }
-        cookies = {}
-        if self.bilibili_sessdata: cookies["SESSDATA"] = self.bilibili_sessdata
-        if self.bilibili_jct: cookies["bili_jct"] = self.bilibili_jct
+        headers = self.build_bilibili_headers()
+        cookies = self.build_bilibili_cookies()
 
         async with session.get(api_url, headers=headers, cookies=cookies) as resp:
             data = await self.read_json_response(resp, "get_video_info")
@@ -308,6 +420,10 @@ class BilibiliSummaryPlugin(Star):
                     'desc': vdata.get('desc'),
                     'video_subtitles': video_subtitles
                 }
+            logger.warning(
+                "Bilibili Summary: get_video_info 返回业务错误 "
+                f"code={data.get('code')} message={data.get('message') or data.get('msg')}"
+            )
         return None
 
     async def get_subtitle(
@@ -320,15 +436,8 @@ class BilibiliSummaryPlugin(Star):
     ) -> Optional[str]:
         """获取字幕内容，结合 player/v2 和 view 接口的返回结果"""
         url = f"https://api.bilibili.com/x/player/v2?aid={aid}&cid={cid}&bvid={bvid}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Referer": "https://www.bilibili.com/"
-        }
-        cookies = {}
-        if self.bilibili_sessdata:
-            cookies["SESSDATA"] = self.bilibili_sessdata
-        if self.bilibili_jct:
-            cookies["bili_jct"] = self.bilibili_jct
+        headers = self.build_bilibili_headers()
+        cookies = self.build_bilibili_cookies()
 
         selected_url = ""
         
@@ -348,6 +457,13 @@ class BilibiliSummaryPlugin(Star):
                                 break
                         if not selected_url:
                             selected_url = subtitles[0].get('subtitle_url', '')
+                elif data:
+                    logger.warning(
+                        "Bilibili Summary: get_subtitle(player/v2) 返回业务错误 "
+                        f"code={data.get('code')} message={data.get('message') or data.get('msg')}"
+                    )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"Bilibili Summary: player/v2 接口调用异常: {e}")
 
@@ -404,6 +520,28 @@ class BilibiliSummaryPlugin(Star):
                     return True
         
         return False
+
+    def is_allowed_video_url(self, url: str) -> bool:
+        """限制短链解析过程中的目标域，避免被重定向到非预期站点。"""
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+
+        allowed_hosts = {
+            "b23.tv",
+            "www.bilibili.com",
+            "m.bilibili.com",
+            "bilibili.com",
+            "www.b23.tv",
+        }
+        if host in allowed_hosts:
+            return True
+
+        return host.endswith(".bilibili.com")
 
     async def download_subtitle(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
         """下载字幕 JSON 并转换为纯文本"""
@@ -462,6 +600,46 @@ class BilibiliSummaryPlugin(Star):
         )
         return truncated + "（内容已截断）"
 
+    def get_int_config(
+        self,
+        key: str,
+        default: int,
+        min_value: int,
+        max_value: int,
+    ) -> int:
+        """读取并校验整数配置，异常值自动回退到安全范围。"""
+        raw_value = self.config.get(key, default)
+        try:
+            parsed_value = int(raw_value)
+        except (TypeError, ValueError):
+            logger.warning(f"Bilibili Summary: 配置 {key} 非法，使用默认值 {default}")
+            return default
+
+        if parsed_value < min_value:
+            logger.warning(f"Bilibili Summary: 配置 {key} 过小，提升到 {min_value}")
+            return min_value
+        if parsed_value > max_value:
+            logger.warning(f"Bilibili Summary: 配置 {key} 过大，限制到 {max_value}")
+            return max_value
+        return parsed_value
+
+    def clamp_prompt_text(self, prompt_template: str, title: str, text: str) -> str:
+        """对最终 prompt 做长度硬约束，避免估算误差导致上下文超限。"""
+        base_prompt = f"{prompt_template}\n\n【视频标题】: {title}\n\n【视频内容信息】:\n"
+        max_prompt_chars = max(2048, min(self.llm_context_budget * 4, 48000))
+        remaining_chars = max_prompt_chars - len(base_prompt)
+        if remaining_chars <= 0:
+            return base_prompt[:max_prompt_chars]
+
+        if len(text) > remaining_chars:
+            logger.info(
+                "Bilibili Summary: 最终 prompt 超出硬限制，"
+                f"正文从 {len(text)} 字裁剪到 {remaining_chars} 字。"
+            )
+            text = text[:remaining_chars]
+
+        return f"{base_prompt}{text}"
+
     async def read_json_response(self, resp: aiohttp.ClientResponse, scene: str) -> Optional[Dict[str, Any]]:
         """统一处理HTTP状态与JSON解析异常，避免上游抖动放大。"""
         if resp.status < 200 or resp.status >= 300:
@@ -470,6 +648,8 @@ class BilibiliSummaryPlugin(Star):
 
         try:
             data = await resp.json(content_type=None)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             text = await resp.text()
             logger.warning(f"Bilibili Summary: {scene} JSON解析失败: {e}; 响应片段: {text[:200]}")
@@ -488,7 +668,7 @@ class BilibiliSummaryPlugin(Star):
             provider_id = await self.context.get_current_chat_provider_id(umo=event.unified_msg_origin)
             
         prompt_template = self.config.get("prompt_template", "你是一个文本阅读和总结专家。我会直接为你提供视频的标题以及完整的字幕文本。请你完全根据我提供的这些文本内容进行总结，不要尝试访问视频或进行任何解析。即使内容较短，也请尽力提炼。请严格以JSON格式返回: {\"core\": \"<核心总结文字>\", \"points\": [\"<要点1>\", \"<要点2>\"]}")
-        prompt = f"{prompt_template}\n\n【视频标题】: {title}\n\n【视频内容信息】:\n{text}"
+        prompt = self.clamp_prompt_text(prompt_template, title, text)
         
         llm_resp = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt)
         content = llm_resp.completion_text.strip()
