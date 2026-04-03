@@ -4,9 +4,8 @@ from astrbot.api.event import filter
 import aiohttp
 import re
 import json
-import ast
 from typing import List, Optional, Dict, Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import astrbot.api.message_components as Comp
 
 @register("bilibili_summary", "YourName", "B站视频总结插件", "1.2.0")
@@ -18,7 +17,7 @@ class BilibiliSummaryPlugin(Star):
         self.bilibili_jct = self.config.get("bilibili_jct", "").strip()
         self.max_subtitle_length = 20000 # 安全截断
     
-    @filter.regex(r"(?i)(?:(?:www\.|m\.)?bilibili\.com/video/|b23\.tv/|BV[1-9A-HJ-NP-Za-km-z]{10}|av\d+)")
+    @filter.regex(r"(?i)(?:(?:www\.|m\.)?bilibili\.com/video/|b23\.tv/|\bBV[1-9A-HJ-NP-Za-km-z]{10}\b|\bav\d+\b)")
     async def bilibili_summary(self, event: AstrMessageEvent):
         '''生成B站视频总结。自动检测B站链接或BV号触发。'''
         
@@ -39,58 +38,110 @@ class BilibiliSummaryPlugin(Star):
         
         yield event.plain_result(f"⏳ 检测到视频，正在获取详情...")
 
-        try:
-            timeout = aiohttp.ClientTimeout(total=45)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                # 2. 解析为 BV 号
+        timeout = aiohttp.ClientTimeout(total=45)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # 2. 解析为 BV 号
+            try:
                 bvid = await self.resolve_video_id(session, video_input)
-                if not bvid:
-                    yield event.plain_result("❌ 无法解析视频 BV 号。\n请确保您发送的是一个有效的 B 站**视频**链接。")
-                    return
+            except Exception as e:
+                logger.error(f"Bilibili Summary stage=resolve_video_id error={e}", exc_info=True)
+                yield event.plain_result("❌ 解析视频标识失败，请检查链接格式。")
+                return
 
-                # 3. 获取视频基本信息 (标题, aid, cid)
+            if not bvid:
+                yield event.plain_result("❌ 无法解析视频 BV 号。\n请确保您发送的是一个有效的 B 站**视频**链接。")
+                return
+
+            # 3. 获取视频基本信息 (标题, aid, cid)
+            try:
                 video_info = await self.get_video_info(session, bvid, page_num)
-                if not video_info:
-                    yield event.plain_result("❌ 获取视频详情失败。")
-                    return
-                
-                video_title = video_info.get('title', '未知标题')
-                yield event.plain_result(f"✅ 成功获取视频: {video_title}\n正在寻找可用字幕...")
+            except Exception as e:
+                logger.error(f"Bilibili Summary stage=get_video_info bvid={bvid} error={e}", exc_info=True)
+                yield event.plain_result("❌ 获取视频详情失败，请稍后再试。")
+                return
 
-                # 4. 获取字幕文本
-                subtitle_text = await self.get_subtitle(session, video_info['aid'], video_info['cid'], bvid, video_info.get('video_subtitles'))
-                if not subtitle_text:
-                    yield event.plain_result("❌ 该视频无可用字幕。")
-                    return
+            if not video_info:
+                yield event.plain_result("❌ 获取视频详情失败。")
+                return
 
-                yield event.plain_result(f"✅ 字幕下载成功 (约 {len(subtitle_text)} 字)\n正在调用 AI 进行总结...")
+            if video_info.get("error"):
+                yield event.plain_result(f"❌ {video_info['error']}")
+                return
 
-                # 5. 调用 AI 总结
+            video_title = video_info.get("title", "未知标题")
+            yield event.plain_result(f"✅ 成功获取视频: {video_title}\n正在寻找可用字幕...")
+
+            # 4. 获取字幕文本
+            try:
+                subtitle_text = await self.get_subtitle(
+                    session,
+                    video_info["aid"],
+                    video_info["cid"],
+                    bvid,
+                    video_info.get("video_subtitles"),
+                )
+            except Exception as e:
+                logger.error(
+                    f"Bilibili Summary stage=get_subtitle bvid={bvid} "
+                    f"aid={video_info.get('aid')} cid={video_info.get('cid')} error={e}",
+                    exc_info=True,
+                )
+                yield event.plain_result("❌ 拉取字幕失败，请稍后再试。")
+                return
+
+            if not subtitle_text:
+                yield event.plain_result("❌ 该视频无可用字幕。")
+                return
+
+            yield event.plain_result(
+                f"✅ 字幕下载成功 (约 {len(subtitle_text)} 字)\n正在调用 AI 进行总结..."
+            )
+
+            # 5. 调用 AI 总结
+            try:
                 summary_data = await self.generate_summary_via_llm(event, subtitle_text, video_title)
-                yield event.plain_result("🚀 AI 总结完成，正在生成卡片...")
-            
-            # 6. 格式化输出
-            result_text = self.format_summary(video_title, summary_data)
-            yield event.plain_result(result_text)
-            
-        except Exception as e:
-            logger.error(f"Bilibili Summary Plugin Error: {str(e)}", exc_info=True)
-            yield event.plain_result("❌ 运行过程中出现错误，请稍后重试。")
+            except Exception as e:
+                logger.error(f"Bilibili Summary stage=llm_generate bvid={bvid} error={e}", exc_info=True)
+                yield event.plain_result("❌ AI 总结生成失败，请稍后重试。")
+                return
+
+            yield event.plain_result("🚀 AI 总结完成，正在生成卡片...")
+
+        # 6. 格式化输出
+        result_text = self.format_summary(video_title, summary_data)
+        yield event.plain_result(result_text)
 
     # ================= 辅助解析逻辑 =================
 
     def extract_bilibili_links_from_message(self, event: AstrMessageEvent) -> List[str]:
         """从消息链中提取所有可能的bilibili链接"""
-        links = []
+        plain_links: List[str] = []
+        reply_links: List[str] = []
+        other_links: List[str] = []
+
         for component in event.message_obj.message:
             if isinstance(component, Comp.Plain):
-                links.extend(self.extract_links_from_text(component.text))
+                plain_links.extend(self.extract_links_from_text(component.text))
             elif isinstance(component, Comp.Reply):
                 if hasattr(component, 'text') and component.text:
-                    links.extend(self.extract_links_from_text(component.text))
+                    reply_links.extend(self.extract_links_from_text(component.text))
             # 兼容更多消息组件：扫描常见字段中的可见文本与URL。
-            links.extend(self.extract_links_from_component(component))
-        return links
+            else:
+                other_links.extend(self.extract_links_from_component(component))
+
+        ordered_links = plain_links + reply_links + other_links
+        return self.deduplicate_keep_order(ordered_links)
+
+    def deduplicate_keep_order(self, values: List[str]) -> List[str]:
+        """按出现顺序去重，避免重复扫描导致的误选。"""
+        seen = set()
+        result: List[str] = []
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            result.append(value)
+        return result
 
     def extract_links_from_component(self, component: Any) -> List[str]:
         """从非纯文本组件中尽可能提取链接或视频标识"""
@@ -127,8 +178,8 @@ class BilibiliSummaryPlugin(Star):
         url_patterns = [
             r'https?://(?:www\.|m\.)?bilibili\.com/video/[^\s\'"<>]+',
             r'https?://b23\.tv/[^\s\'"<>]+',
-            r'BV[1-9A-HJ-NP-Za-km-z]{10}',
-            r'(?i)av\d+',
+            r'\bBV[1-9A-HJ-NP-Za-km-z]{10}\b',
+            r'(?i)\bav\d+\b',
         ]
         links = []
         for pattern in url_patterns:
@@ -181,7 +232,7 @@ class BilibiliSummaryPlugin(Star):
         bv_match = re.search(r'(BV[1-9A-HJ-NP-Za-km-z]{10})', video_input)
         if bv_match: return bv_match.group(1)
 
-        av_match = re.search(r'(?i)av(\d+)', video_input)
+        av_match = re.search(r'(?i)\bav(\d+)\b', video_input)
         if av_match:
             aid = av_match.group(1)
             api_url = f"https://api.bilibili.com/x/web-interface/view?aid={aid}"
@@ -217,6 +268,11 @@ class BilibiliSummaryPlugin(Star):
                 cid = vdata.get('cid') # 默认取 P1
                 title = vdata.get('title', '')
                 page = max(1, page)
+
+                if pages and page > len(pages):
+                    return {
+                        "error": f"请求分P超出范围：该视频仅有 {len(pages)} P。"
+                    }
                 
                 # 如果是多P视频，根据 page 参数获取对应的 cid
                 if len(pages) >= page:
@@ -238,7 +294,14 @@ class BilibiliSummaryPlugin(Star):
                 }
         return None
 
-    async def get_subtitle(self, session: aiohttp.ClientSession, aid: int, cid: int, bvid: str, fallback_subtitles: List[Dict] = None) -> Optional[str]:
+    async def get_subtitle(
+        self,
+        session: aiohttp.ClientSession,
+        aid: int,
+        cid: int,
+        bvid: str,
+        fallback_subtitles: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[str]:
         """获取字幕内容，结合 player/v2 和 view 接口的返回结果"""
         url = f"https://api.bilibili.com/x/player/v2?aid={aid}&cid={cid}&bvid={bvid}"
         headers = {
@@ -280,9 +343,28 @@ class BilibiliSummaryPlugin(Star):
 
         if selected_url:
             if selected_url.startswith("//"): selected_url = "https:" + selected_url
+            if not self.is_allowed_subtitle_url(selected_url):
+                logger.warning(f"Bilibili Summary: 字幕URL不在白名单内: {selected_url}")
+                return None
             return await self.download_subtitle(session, selected_url)
             
         return None
+
+    def is_allowed_subtitle_url(self, url: str) -> bool:
+        """限制字幕下载目标域，降低意外外连风险。"""
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+
+        allowed_suffixes = (
+            "bilibili.com",
+            "bilivideo.com",
+            "hdslb.com",
+        )
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in allowed_suffixes)
 
     async def download_subtitle(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
         """下载字幕 JSON 并转换为纯文本"""
@@ -361,7 +443,7 @@ class BilibiliSummaryPlugin(Star):
         }
 
     def parse_llm_json(self, content: str) -> Optional[Dict[str, Any]]:
-        """从LLM输出中提取JSON对象，容忍少量格式偏差。"""
+        """从LLM输出中提取JSON对象，仅接受严格JSON。"""
         cleaned = content.strip()
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -376,18 +458,17 @@ class BilibiliSummaryPlugin(Star):
         # 允许存在前后说明文字，抽取第一个JSON对象。
         match = re.search(r"\{[\s\S]*\}", cleaned)
         if match:
-            candidate = match.group(0)
+            candidate = self.sanitize_json_candidate(match.group(0))
             try:
                 obj = json.loads(candidate)
                 return obj if isinstance(obj, dict) else None
             except json.JSONDecodeError:
-                # 回退支持单引号字典样式。
-                try:
-                    obj = ast.literal_eval(candidate)
-                    return obj if isinstance(obj, dict) else None
-                except (ValueError, SyntaxError):
-                    return None
+                return None
         return None
+
+    def sanitize_json_candidate(self, candidate: str) -> str:
+        """对候选JSON做最小修复：去除对象/数组结尾多余逗号。"""
+        return re.sub(r",\s*([}\]])", r"\1", candidate)
 
     def format_summary(self, title: str, summary: dict) -> str:
         core = summary.get('core', '无')
