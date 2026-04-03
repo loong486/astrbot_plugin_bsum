@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://socialify.git.ci/loong486/astrbot_plugin_bsum/image?description=1&font=Inter&forks=1&issues=1&language=1&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Dark" alt="astrbot_plugin_bsum" width="640" height="320" />
+  <img src="https://socialify.git.ci/loong486/astrbot_plugin_bilisu/image?description=1&font=Inter&forks=1&issues=1&language=1&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Dark" alt="astrbot_plugin_bsum" width="640" height="320" />
 </div>
 
 <div align="center">
