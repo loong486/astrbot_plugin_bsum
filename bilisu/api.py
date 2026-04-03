@@ -46,6 +46,38 @@ def _is_allowed_subtitle_url(url: str) -> bool:
     return False
 
 
+def _pick_best_subtitle(subtitles: List[Dict[str, Any]]) -> str:
+    """从字幕列表中按优先级挑选最佳字幕 URL。
+
+    优先级（高→低）：
+      1. 人工 CC 中文（ai_type=0, lan 含 zh）
+      2. 人工 CC 任意语言（ai_type=0）
+      3. AI 生成中文（ai_type!=0, lan 含 zh）
+      4. 列表首项
+
+    Bilibili player/v2 字幕对象中 ai_type=0 表示人工提交，
+    ai_type=1 表示 AI 自动生成；缺失该字段时视同人工。
+    """
+    manual_zh = manual_any = ai_zh = None
+    for sub in subtitles:
+        url = sub.get("subtitle_url", "")
+        if not url:
+            continue
+        ai_type = sub.get("ai_type", 0)
+        lan = sub.get("lan", "").lower()
+        is_manual = (ai_type == 0)
+        is_zh = ("zh" in lan)
+
+        if is_manual and is_zh and manual_zh is None:
+            manual_zh = url
+        if is_manual and manual_any is None:
+            manual_any = url
+        if not is_manual and is_zh and ai_zh is None:
+            ai_zh = url
+
+    return manual_zh or manual_any or ai_zh or subtitles[0].get("subtitle_url", "")
+
+
 class BilibiliAPI:
     """封装所有对 B 站外部 HTTP API 的调用。"""
 
@@ -166,12 +198,7 @@ class BilibiliAPI:
                         .get("subtitles", [])
                     )
                     if subtitles:
-                        for sub in subtitles:
-                            if "zh" in sub.get("lan", "").lower():
-                                selected_url = sub.get("subtitle_url", "")
-                                break
-                        if not selected_url:
-                            selected_url = subtitles[0].get("subtitle_url", "")
+                        selected_url = _pick_best_subtitle(subtitles)
                 elif data:
                     logger.warning(
                         f"[bilisu/api] player/v2 业务错误 "
@@ -185,12 +212,7 @@ class BilibiliAPI:
         # 回退到 view 接口字幕
         if not selected_url and video_info.video_subtitles:
             logger.info("[bilisu/api] player/v2 无字幕，尝试 view 接口备选字幕。")
-            for sub in video_info.video_subtitles:
-                if "zh" in sub.get("lan", "").lower():
-                    selected_url = sub.get("subtitle_url", "")
-                    break
-            if not selected_url:
-                selected_url = video_info.video_subtitles[0].get("subtitle_url", "")
+            selected_url = _pick_best_subtitle(video_info.video_subtitles)
 
         if not selected_url:
             return None
