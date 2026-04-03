@@ -51,6 +51,12 @@ class BilibiliSummaryPlugin(Star):
             min_value=1000,
             max_value=100000,
         )
+        self.max_component_scan_depth = self.get_int_config(
+            "max_component_scan_depth",
+            default=5,
+            min_value=1,
+            max_value=20,
+        )
         self.llm_context_budget = self.get_int_config(
             "llm_context_budget",
             default=3000,
@@ -91,57 +97,79 @@ class BilibiliSummaryPlugin(Star):
         if not links:
             return
 
-        # 仅处理第一个发现的链接
-        video_input = links[0]
-        logger.info(f"Bilibili Summary: 提取到视频标识: {video_input}")
-        
-        # 提取分P号
-        page_num = 1
-        p_match = self.PAGE_PARAM_PATTERN.search(video_input)
-        if p_match:
-            raw_page = int(p_match.group(1))
-            # 防护：页码不合理时回退到 P1
-            page_num = max(1, min(raw_page, self.page_upper_bound))
-        
         yield event.plain_result(f"⏳ 检测到视频，正在获取详情...")
 
         timeout = aiohttp.ClientTimeout(total=self.request_timeout)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # 2. 解析为 BV 号
-            try:
-                bvid = await self.resolve_video_id(session, video_input)
-            except asyncio.CancelledError:
-                raise
-            except asyncio.TimeoutError:
-                logger.warning("Bilibili Summary stage=resolve_video_id timeout")
-                yield event.plain_result("❌ 解析视频标识超时，请稍后重试。")
-                return
-            except Exception as e:
-                logger.warning(f"Bilibili Summary stage=resolve_video_id error={type(e).__name__}")
-                yield event.plain_result("❌ 解析视频标识失败，请检查链接格式。")
-                return
+            selected_input = None
+            selected_bvid = None
+            selected_page_num = 1
+            video_info = None
+            resolve_error_seen = False
+            last_video_error = None
 
-            if not bvid:
+            for candidate in links:
+                logger.info(f"Bilibili Summary: 尝试候选标识: {candidate}")
+                candidate_page_num = self.extract_page_num(candidate)
+
+                try:
+                    candidate_bvid = await self.resolve_video_id(session, candidate)
+                except asyncio.CancelledError:
+                    raise
+                except asyncio.TimeoutError:
+                    logger.warning("Bilibili Summary stage=resolve_video_id timeout")
+                    resolve_error_seen = True
+                    continue
+                except Exception as e:
+                    logger.warning(f"Bilibili Summary stage=resolve_video_id error={type(e).__name__}")
+                    resolve_error_seen = True
+                    continue
+
+                if not candidate_bvid:
+                    continue
+
+                try:
+                    candidate_video_info = await self.get_video_info(
+                        session,
+                        candidate_bvid,
+                        candidate_page_num,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        f"Bilibili Summary stage=get_video_info bvid={candidate_bvid} "
+                        f"error={type(e).__name__}"
+                    )
+                    resolve_error_seen = True
+                    continue
+
+                if not candidate_video_info:
+                    continue
+
+                if candidate_video_info.get("error"):
+                    last_video_error = candidate_video_info["error"]
+                    continue
+
+                selected_input = candidate
+                selected_bvid = candidate_bvid
+                selected_page_num = candidate_page_num
+                video_info = candidate_video_info
+                break
+
+            if not selected_bvid:
+                if last_video_error:
+                    yield event.plain_result(f"❌ {last_video_error}")
+                    return
+                if resolve_error_seen:
+                    yield event.plain_result("❌ 解析视频标识失败，请稍后重试。")
+                    return
                 yield event.plain_result("❌ 无法解析视频 BV 号。\n请确保您发送的是一个有效的 B 站**视频**链接。")
                 return
 
-            # 3. 获取视频基本信息 (标题, aid, cid)
-            try:
-                video_info = await self.get_video_info(session, bvid, page_num)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning(f"Bilibili Summary stage=get_video_info bvid={bvid} error={type(e).__name__}")
-                yield event.plain_result("❌ 获取视频详情失败，请稍后再试。")
-                return
-
-            if not video_info:
-                yield event.plain_result("❌ 获取视频详情失败。")
-                return
-
-            if video_info.get("error"):
-                yield event.plain_result(f"❌ {video_info['error']}")
-                return
+            video_input = selected_input
+            bvid = selected_bvid
+            page_num = selected_page_num
 
             video_title = video_info.get("title", "未知标题")
             yield event.plain_result(f"✅ 成功获取视频: {video_title}\n正在寻找可用字幕...")
@@ -247,8 +275,10 @@ class BilibiliSummaryPlugin(Star):
             links.extend(self.extract_links_from_text(text))
         return links
 
-    def _flatten_strings(self, value: Any, max_depth: int = 5) -> List[str]:
+    def _flatten_strings(self, value: Any, max_depth: Optional[int] = None) -> List[str]:
         """递归提取容器中的字符串，用于兜底扫描链接，增加深度限制避免栈溢出。"""
+        if max_depth is None:
+            max_depth = self.max_component_scan_depth
         if max_depth <= 0:
             return []
         
@@ -276,12 +306,22 @@ class BilibiliSummaryPlugin(Star):
             for match in re.finditer(pattern, text):
                 matched_text = match.group(0)
                 if self.BV_TEXT_PATTERN.fullmatch(matched_text):
-                    matched_text = matched_text.upper()
+                    matched_text = self.normalize_bvid_prefix(matched_text)
                 matches_with_pos.append((match.start(), matched_text))
 
         matches_with_pos.sort(key=lambda x: x[0])
         links = [m[1] for m in matches_with_pos]
         return links
+
+    def extract_page_num(self, video_input: str) -> int:
+        """从候选输入中提取分P号，解析失败时回退到 P1。"""
+        page_num = 1
+        p_match = self.PAGE_PARAM_PATTERN.search(video_input)
+        if not p_match:
+            return page_num
+
+        raw_page = int(p_match.group(1))
+        return max(1, min(raw_page, self.page_upper_bound))
 
     def extract_video_id_from_url(self, video_input: str) -> Optional[str]:
         """优先从完整 bilibili URL 的路径中提取视频 ID，避免正则误命中。"""
@@ -299,13 +339,19 @@ class BilibiliSummaryPlugin(Star):
 
         candidate = path_parts[1].strip()
         if self.BVID_STRICT_PATTERN.match(candidate):
-            return candidate.upper()
+            return self.normalize_bvid_prefix(candidate)
 
         av_match = self.AV_SEARCH_PATTERN.fullmatch(candidate)
         if av_match:
             return f"av{av_match.group(1)}"
 
         return None
+
+    def normalize_bvid_prefix(self, bvid: str) -> str:
+        """仅规范 BV 前缀大小写，保留后续字符原始大小写。"""
+        if len(bvid) < 2:
+            return bvid
+        return f"BV{bvid[2:]}"
 
     def format_bilibili_api_error(self, scene: str, data: Dict[str, Any]) -> str:
         """将 B 站接口业务错误转换为用户可理解的错误信息。"""
@@ -327,12 +373,12 @@ class BilibiliSummaryPlugin(Star):
         """将各种输入格式统一解析为 BV 号，修复短链冗余与死循环风险"""
         # 1. 已经是 BV 号
         if self.BVID_STRICT_PATTERN.match(video_input):
-            return video_input.upper()
+            return self.normalize_bvid_prefix(video_input)
 
         normalized_video_id = self.extract_video_id_from_url(video_input)
         if normalized_video_id:
-            if normalized_video_id.upper().startswith("BV"):
-                return normalized_video_id.upper()
+            if normalized_video_id.lower().startswith("bv"):
+                return self.normalize_bvid_prefix(normalized_video_id)
             video_input = normalized_video_id
         
         # 2. 短链接 b23.tv - 手动逐跳跟随并校验目标域
@@ -371,12 +417,12 @@ class BilibiliSummaryPlugin(Star):
 
                         bv_match = self.BVID_SEARCH_PATTERN.search(final_url)
                         if bv_match:
-                            return bv_match.group(1).upper()
+                            return self.normalize_bvid_prefix(bv_match.group(1))
 
                         text = await resp.text()
                         bv_match = self.BVID_SEARCH_PATTERN.search(text)
                         if bv_match:
-                            return bv_match.group(1).upper()
+                            return self.normalize_bvid_prefix(bv_match.group(1))
                         return None
 
                 logger.warning("Bilibili Summary: 短链跳转次数超限")
@@ -392,7 +438,7 @@ class BilibiliSummaryPlugin(Star):
         # 3. 完整链接或 av 号
         bv_match = self.BVID_SEARCH_PATTERN.search(video_input)
         if bv_match:
-            return bv_match.group(1).upper()
+            return self.normalize_bvid_prefix(bv_match.group(1))
 
         av_match = self.AV_SEARCH_PATTERN.search(video_input)
         if av_match:
@@ -539,18 +585,7 @@ class BilibiliSummaryPlugin(Star):
         if not host:
             return False
         
-        # 显式白名单：完整域名或直接子域（不允许多级子域）
-        allowed_hosts = {
-            "bilibili.com",
-            "www.bilibili.com",
-            "m.bilibili.com",
-            "bilivideo.com",
-            "www.bilivideo.com",
-            "hdslb.com",
-            "www.hdslb.com",
-        }
-        
-        if host in allowed_hosts:
+        if host in self.ALLOWED_SUBTITLE_HOSTS:
             return True
         
         # 只允许一级子域（*.bilibili.com 但不允许 a.b.bilibili.com）
@@ -573,14 +608,7 @@ class BilibiliSummaryPlugin(Star):
         if not host:
             return False
 
-        allowed_hosts = {
-            "b23.tv",
-            "www.bilibili.com",
-            "m.bilibili.com",
-            "bilibili.com",
-            "www.b23.tv",
-        }
-        if host in allowed_hosts:
+        if host in self.ALLOWED_VIDEO_HOSTS:
             return True
 
         return host.endswith(".bilibili.com")
